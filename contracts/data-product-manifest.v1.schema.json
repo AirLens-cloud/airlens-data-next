@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AirLens-cloud/airlens-data/contracts/data-product-manifest.v1.schema.json",
+  "title": "Data Product Manifest v1",
+  "description": "EVIDENCE_CONTRACT.md §5-1 producer obligation. One document lists every published product with its owner, coverage, freshness SLA, real partition inventory, quality profile, access surface and known limitations. A field the producer could not measure is null with a reason string — never a fabricated constant (§1-1).",
+  "type": "object",
+  "required": ["schemaVersion", "generatedAt", "products"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "products": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/product" }
+    }
+  },
+  "$defs": {
+    "nullableWithReason": {
+      "description": "Pattern for a measured value that may be unavailable: value is null iff reason is a non-empty string, and vice versa.",
+      "type": "object"
+    },
+    "variable": {
+      "type": "object",
+      "required": ["name", "unit"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "unit": { "type": "string" }
+      }
+    },
+    "partition": {
+      "type": "object",
+      "required": ["path", "fileCount", "bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "fileCount": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "rowCount": { "type": ["integer", "null"], "minimum": 0 },
+        "rowCountReason": { "type": ["string", "null"] },
+        "sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "sha256Reason": { "type": ["string", "null"] },
+        "lastModifiedAt": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "deprecation": {
+      "type": "object",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "enum": ["active", "deprecated", "superseded"] },
+        "supersededBy": { "type": ["string", "null"] },
+        "sunsetAt": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "qualityProfile": {
+      "type": "object",
+      "required": ["nullRatio", "duplicateRatio", "coordinateIssues", "temporalGaps", "agreement", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "nullRatio": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "duplicateRatio": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "coordinateIssues": { "type": ["integer", "null"], "minimum": 0 },
+        "temporalGaps": { "type": ["integer", "null"], "minimum": 0 },
+        "agreement": { "type": ["number", "null"] },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required disclosure of what was/wasn't measured — content-level QA is not yet implemented (v1 scope)."
+        }
+      }
+    },
+    "access": {
+      "type": "object",
+      "required": ["uiSample", "restApi", "mcpApi", "directArtifact", "citation"],
+      "additionalProperties": false,
+      "properties": {
+        "uiSample": { "type": ["string", "null"] },
+        "uiSampleReason": { "type": ["string", "null"] },
+        "restApi": { "type": ["string", "null"] },
+        "restApiReason": { "type": ["string", "null"] },
+        "mcpApi": { "type": ["string", "null"] },
+        "mcpApiReason": { "type": ["string", "null"] },
+        "directArtifact": { "type": "string", "minLength": 1 },
+        "citation": { "type": "string", "minLength": 1 }
+      }
+    },
+    "time": {
+      "type": "object",
+      "required": ["lastSuccessfulIngestAt", "publishedAt", "validAt"],
+      "additionalProperties": false,
+      "properties": {
+        "lastSuccessfulIngestAt": { "type": ["string", "null"], "format": "date-time" },
+        "lastSuccessfulIngestReason": { "type": ["string", "null"] },
+        "publishedAt": { "type": ["string", "null"], "format": "date-time" },
+        "publishedAtReason": { "type": ["string", "null"] },
+        "validAt": { "type": ["string", "null"], "format": "date-time" },
+        "validAtReason": { "type": ["string", "null"] }
+      }
+    },
+    "product": {
+      "type": "object",
+      "required": [
+        "productId",
+        "title",
+        "description",
+        "owner",
+        "schemaVersion",
+        "nature",
+        "variables",
+        "spatialCoverage",
+        "temporalCoverage",
+        "resolution",
+        "sourceRefs",
+        "license",
+        "attribution",
+        "time",
+        "freshnessSlaSeconds",
+        "freshnessSlaReason",
+        "partitions",
+        "qualityProfile",
+        "access",
+        "knownLimitations",
+        "deprecation"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "productId": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "owner": { "type": "string", "minLength": 1 },
+        "schemaVersion": { "type": "string" },
+        "nature": {
+          "enum": [
+            "observation",
+            "analysis",
+            "interpolated",
+            "forecast",
+            "satellite-derived",
+            "inferred",
+            "policy"
+          ]
+        },
+        "variables": { "type": "array", "items": { "$ref": "#/$defs/variable" } },
+        "spatialCoverage": { "type": "string", "minLength": 1 },
+        "temporalCoverage": { "type": "string", "minLength": 1 },
+        "resolution": { "type": "string", "minLength": 1 },
+        "sourceRefs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "source_registry.v1.json sourceId references."
+        },
+        "license": { "type": "string", "minLength": 1 },
+        "attribution": { "type": "string", "minLength": 1 },
+        "time": { "$ref": "#/$defs/time" },
+        "freshnessSlaSeconds": { "type": ["integer", "null"], "minimum": 0 },
+        "freshnessSlaReason": {
+          "type": ["string", "null"],
+          "description": "Required when freshnessSlaSeconds is null."
+        },
+        "partitions": { "type": "array", "items": { "$ref": "#/$defs/partition" } },
+        "qualityProfile": { "$ref": "#/$defs/qualityProfile" },
+        "access": { "$ref": "#/$defs/access" },
+        "knownLimitations": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "deprecation": { "$ref": "#/$defs/deprecation" }
+      }
+    }
+  }
+}

@@ -1,0 +1,84 @@
+name: Policy Collect (weekly)
+
+# Free ($0) structured policy archive refresh, migrated from the AirLens
+# monorepo (repo split, 2026-08-26). Server-Collect: GitHub Actions runner →
+# HF dataset (Supabase retired 2026-08 — the old policy_registry upsert is gone).
+#
+# Weekly tick refreshes the light structured sources (WHO standards + major
+# policies + US Federal Register). The large Climate Policy Radar corpus
+# refresh is opt-in via the run_cpr dispatch input.
+#
+# Publish targets (HF Robeedau/airlens-live):
+#   insights-data/policy/policy_registry.json                     — full registry (SOT)
+#   insights-data/policy/policy-index.json                        — per-country index
+#   insights-data/policy/policy-registry/{CC}.json                — per-country detail
+#   insights-data/policy/policy-registry/global-summary.json      — stats
+#   insights-data/policy/policy-registry/recent.json              — recent policies feed
+
+on:
+  schedule:
+    - cron: '0 4 * * 0'   # 매주 일요일 04:00 UTC (KST 13:00)
+  workflow_dispatch:
+    inputs:
+      run_cpr:
+        description: 'Refresh Climate Policy Radar corpus (~3.59GB HF download)'
+        type: boolean
+        default: false
+      run_llm_extract:
+        description: 'Run LLM extraction of free-text policies (needs OPENAI_API_KEY)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect-policies:
+    if: github.repository == 'AirLens-cloud/airlens-data'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install --quiet requests pyarrow pdfplumber "huggingface_hub>=0.34,<2"
+
+      - name: Build policy registry (free structured sources)
+        env:
+          RUN_CPR: ${{ inputs.run_cpr && '1' || '0' }}
+          CPR_SKIP_DOWNLOAD: ''
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          RUN_LLM_EXTRACT: ${{ inputs.run_llm_extract && '1' || '0' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          mkdir -p apps/web/public/data
+          bash scripts/etl/collect_policies/run_pipeline.sh
+
+      - name: Publish to HF (insights-data/policy, fail-loud)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python3 scripts/etl/hf_publish.py upload \
+            --src Data/6-policy-analysis/registry/policy_registry.json \
+            --dest insights-data/policy/policy_registry.json
+          python3 scripts/etl/hf_publish.py upload \
+            --src apps/web/public/data \
+            --dest insights-data/policy
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Policy Collect Result" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Ran at: $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
+          if [ -f Data/6-policy-analysis/registry/policy_registry.json ]; then
+            COUNT=$(python3 -c "import json; print(len(json.load(open('Data/6-policy-analysis/registry/policy_registry.json'))))")
+            echo "Registry policies built: $COUNT" >> $GITHUB_STEP_SUMMARY
+          fi

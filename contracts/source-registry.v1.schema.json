@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AirLens-cloud/airlens-data/contracts/source-registry.v1.schema.json",
+  "title": "Source Registry v1",
+  "description": "EVIDENCE_CONTRACT.md §5-4 — source status/license/coverage/cadence/last_success as a published artifact, replacing hardcoded UI source constants (e.g. former apps/web datasources/constants.ts).",
+  "type": "object",
+  "required": ["schemaVersion", "generatedAt", "sources"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "sources": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/source" }
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "required": [
+        "sourceId",
+        "provider",
+        "status",
+        "license",
+        "coverage",
+        "cadence",
+        "lastSuccess",
+        "lastSuccessReason",
+        "products"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "sourceId": { "type": "string", "minLength": 1 },
+        "provider": { "type": "string", "minLength": 1 },
+        "status": {
+          "enum": ["active", "degraded", "unknown"],
+          "description": "Derived from the worst ProductHealth.status among referencing products — not a standalone probe in v1."
+        },
+        "license": { "type": "string", "minLength": 1 },
+        "coverage": { "type": "string", "minLength": 1 },
+        "cadence": { "type": "string", "minLength": 1, "description": "ISO 8601 duration (e.g. PT3H) or free-text cron description." },
+        "lastSuccess": { "type": ["string", "null"], "format": "date-time" },
+        "lastSuccessReason": {
+          "type": ["string", "null"],
+          "description": "Required when lastSuccess is null."
+        },
+        "products": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "productId refs from data-product-manifest.v1.json."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# publish_contracts.py 로컬 dry-run 출력 — HF meta/ 로 발행되는 산출물이라 이 레포에는
+# 커밋하지 않는다 (scripts/publish_contracts.py --dry-run 기본 출력 위치).
+/meta/
+
+# 에이전트 하네스 로컬 상태/로그 (소스 아님)
+.agent/
+
+# Claude 세션 로그·락 (로컬 전용)
+.claude/
+
+# 멀티세션 worktree (로컬 전용 — 소스 아님)
+.worktrees/

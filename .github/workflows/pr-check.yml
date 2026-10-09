@@ -1,0 +1,37 @@
+name: PR Check
+
+# 이 레포는 2026-08-26 분할 이후 프로덕션 수집기를 돌리는 쪽인데, PR 게이트가
+# 없었다. `scripts/etl/` 에 테스트 305개가 있으면서도 어느 워크플로도 실행하지
+# 않아, 깨진 변경이 머지된 뒤 매시간 도는 수집 잡에서야 드러나는 구조였다
+# (2026-09-04 실측). 발행 전에 막는 것이 목적이다.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  etl-tests:
+    name: scripts — pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: python3 -m pip install --quiet -r requirements.txt
+
+      # scripts/ 전체를 돈다 — etl 305건 + contracts 계약 테스트. 파일 목록을
+      # 워크플로에 박으면 새 테스트가 조용히 안 돌게 되므로 디렉터리로 지정한다.
+      - name: pytest
+        run: python3 -m pytest scripts -q

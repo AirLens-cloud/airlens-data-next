@@ -1,0 +1,14 @@
+[Unit]
+Description=AirLens chat-log pull timer (hourly)
+Documentation=https://github.com/AirLens-cloud/airlens-web
+
+[Timer]
+# Hourly slice. Slots are staggered (:05 sc / :15 openaq / :35 chatlog) so the
+# collectors never overlap their memory peaks on a 1GB box.
+OnCalendar=*-*-* *:35:00
+RandomizedDelaySec=0
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

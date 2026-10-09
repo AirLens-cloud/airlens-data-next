@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AirLens-cloud/airlens-data/contracts/product-health.v1.schema.json",
+  "title": "Product Health v1",
+  "description": "EVIDENCE_CONTRACT.md §5-5 — separates process liveness from dataset readiness. Maps to /v1/health/products on the consumer side; a catalog listing alone (no per-product freshness/reachability) is a §1 violation per the spec note.",
+  "type": "object",
+  "required": ["schemaVersion", "generatedAt", "products"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "products": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/productHealth" }
+    }
+  },
+  "$defs": {
+    "productHealth": {
+      "type": "object",
+      "required": ["productId", "status", "lastProbeAt", "schemaValid", "artifactReachable"],
+      "additionalProperties": false,
+      "properties": {
+        "productId": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["ready", "partial", "stale", "missing", "invalid"] },
+        "lastProbeAt": { "type": "string", "format": "date-time" },
+        "lastPublishedAt": { "type": "string", "format": "date-time" },
+        "ageSeconds": { "type": "number", "minimum": 0 },
+        "slaSeconds": { "type": "number", "minimum": 0 },
+        "schemaValid": { "type": "boolean" },
+        "artifactReachable": { "type": "boolean" },
+        "checksumValid": { "type": "boolean" },
+        "reason": { "type": "string", "minLength": 1 }
+      },
+      "if": {
+        "properties": { "status": { "enum": ["stale", "missing", "invalid"] } },
+        "required": ["status"]
+      },
+      "then": {
+        "description": "EVIDENCE_CONTRACT.md §7: a non-ready/partial status must explain itself.",
+        "required": ["reason"]
+      }
+    }
+  }
+}

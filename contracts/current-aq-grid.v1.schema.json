@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AirLens-cloud/airlens-data/contracts/current-aq-grid.v1.schema.json",
+  "title": "Current AQ Grid v1",
+  "description": "scripts/etl/collect_noaa_aq.py 가 만들어 aq-data/current-{pm25,pm10}-grid.json 으로 발행하는 전지구 격자. 두 변수가 같은 빌더를 쓰므로 계약도 하나다. 셀 값 상한: 초판이 상한을 걸지 않은 이유(문헌 1차 출처 미확보)는 2026-09-05 해소됐다 — 발표된 QC 관행(PM2.5 시간별 >1,000 제외, Mathieu-Campbell 2024)과 기록 극값 봉투(PM10 시간평균 ≈6,460 / 일평균 ≈7,414 µg/m³)가 확보되어 생산자가 변수별 물리 상한(pm2_5 1,000 / pm10 10,000 — 후자는 봉투 위 내부 결정)으로 초과 셀을 결측 처리한다. 계약 수준에서는 두 변수의 느슨한 쪽(10,000)만 백스톱으로 건다 — 변수별 정밀 상한은 생산자 책임이고 nAbovePhysicalMaxNulled 공시가 증거다. 그 아래는 (1) 음수 결측 처리 (2) 분포 요약의 단위 변환 보초 (3) EPA AQI 스케일 초과 셀 수 공시가 기존대로 담당한다.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "variable",
+    "resolution",
+    "timestamp",
+    "generatedAt",
+    "nLat",
+    "nLon",
+    "latMin",
+    "lonMin",
+    "dLat",
+    "dLon",
+    "source",
+    "distribution",
+    "epaAqiScaleTopUgm3",
+    "nAboveEpaAqiScaleTop",
+    "nNegativeCellsNulled",
+    "physicalMaxUgm3",
+    "nAbovePhysicalMaxNulled",
+    "points"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "variable": {
+      "description": "빌더가 처리하는 두 변수. 새 변수를 VARS 에 추가하면 여기도 열어야 하고, 그때 collect_noaa_aq.py 의 SANE_MEDIAN_* 경계가 그 변수의 배경농도대에도 맞는지 재검토해야 한다.",
+      "enum": ["pm2_5", "pm10"]
+    },
+    "resolution": { "type": "number", "minimum": 0 },
+    "timestamp": {
+      "description": "GEFS 사이클 시각(epoch ms). 데이터가 유효한 시각이지 파일을 만든 시각이 아니다 — 후자는 generatedAt.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "generatedAt": {
+      "description": "이 파일을 만든 시각(UTC ISO-8601). 신선도 라이브 프로브가 읽을 수 있게 싣는다 — wind 에는 있고 AQ 격자에는 없던 필드라, 수집이 조용히 멈춰도 발행물만 보고는 알 수 없었다.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "nLat": { "type": "integer", "minimum": 1 },
+    "nLon": { "type": "integer", "minimum": 1 },
+    "latMin": { "type": "number", "minimum": -90, "maximum": 90 },
+    "lonMin": { "type": "number", "minimum": -180, "maximum": 180 },
+    "dLat": { "type": "number", "minimum": 0 },
+    "dLon": { "type": "number", "minimum": 0 },
+    "source": { "const": "NOAA GEFS-Aerosols" },
+    "distribution": {
+      "description": "단위 변환 사고 보초. 미변환 격자(참값의 1e-9)는 모든 값이 0 에 붙으므로 상한 검사로는 절대 잡히지 않고, 오히려 '이상값 없음' 으로 보인다. 중앙값이 지표 배경농도대에 있는지가 유일하게 양방향을 다 잡는 검사다. 실측 기준선(2026-09-04): pm2_5 p50 4.97 / pm10 p50 14.81.",
+      "type": "object",
+      "required": ["n", "min", "p50", "p99", "max"],
+      "additionalProperties": false,
+      "properties": {
+        "n": { "type": "integer", "minimum": 1 },
+        "min": { "type": "number", "minimum": 0 },
+        "p50": { "type": "number", "minimum": 0.01, "maximum": 2000 },
+        "p99": { "type": "number", "minimum": 0 },
+        "max": { "type": "number", "minimum": 0 }
+      }
+    },
+    "epaAqiScaleTopUgm3": {
+      "description": "이 변수의 US EPA AQI 표 최상단 농도(24h). pm2_5=500.4 / pm10=604. 물리상한이 아니라 **외부에 정의된 보고 스케일의 끝**이다 — 이 위의 값을 '불가능' 이라 부르지 않고 '우리가 등급을 매길 수 없는 구간' 이라고만 말한다.",
+      "type": "number",
+      "minimum": 0
+    },
+    "nAboveEpaAqiScaleTop": {
+      "description": "epaAqiScaleTopUgm3 초과 셀 수. required 이고 기본값을 두지 않는다 — 기본 0 을 허용하면 '측정 안 함' 이 '0건' 으로 둔갑한다. 값을 지우지 않고 세기만 하는 이유: 셀을 결측 처리하면 최근접 조회가 말없이 먼 셀을 집고 모델이 그 값을 냈다는 사실 자체가 사라진다.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "nNegativeCellsNulled": {
+      "description": "생산자가 물리적으로 불가능하다고 판단해 null 로 떨군 셀 수 (음수 질량농도). nAboveEpaAqiScaleTop 와 대칭이지만 처분이 반대인 이유: 상한 초과는 실제 사건일 수 있어 세기만 하고, 음수는 어떤 대기 상태도 낼 수 없으므로 값이 아니라 결측이다. required 이고 기본값을 두지 않는다 — 기본 0 은 '필터가 안 돌았다' 를 '0건 발견' 으로 둔갑시킨다. 이 필드가 0 이 아니면 GEFS decode 나 단위 변환을 의심할 신호다.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "physicalMaxUgm3": {
+      "description": "생산자가 이 변수에 적용한 물리 상한 (µg/m³). pm2_5=1,000 (발표된 QC 관행 — 문헌 근거) / pm10=10,000 (기록 극값 봉투 위 내부 결정 — 문헌 값 아님, 그렇게 구분 표기하는 것이 규칙이다). 공시가 없으면 '0건' 과 '안 걸렀다' 가 구분되지 않는다. 근거 정본 = 모노레포 CS 설계 보강 팩 findings.md Q9 (2026-09-05 사용자 확정).",
+      "type": "number",
+      "minimum": 1
+    },
+    "nAbovePhysicalMaxNulled": {
+      "description": "physicalMaxUgm3 초과라 null 로 떨군 셀 수. nAboveEpaAqiScaleTop(세기만 함 — 등급 불가 구간)과 역할이 다르다: 여기는 발표된 QC 관행·기록 극값 봉투 위의 값이라 음수와 같은 결측 처분이다. 2026-09-03 지구본 12,585 µg/m³ 사고가 이 상한의 발의 사례. required 이고 기본값 없음 — 같은 둔갑 방지 이유.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "points": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["lat", "lon", "value"],
+        "additionalProperties": false,
+        "properties": {
+          "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+          "lon": { "type": "number", "minimum": -180, "maximum": 180 },
+          "value": {
+            "description": "null 을 허용하는 것은 필수다. non-nullable 로 잠그면 정직한 결측이 계약에 막혀 발행 전체가 멈춘다 — 이 조직에서 실제로 난 사고다(AirLens-platform db63c41c: DQSS final_score 를 non-nullable 로 두어 측정 성분 0개 지점이 발행을 exit 1 로 세움). maximum 10,000 은 두 변수의 느슨한 쪽 백스톱이다 — 변수별 정밀 상한(pm2_5 1,000)은 생산자가 걸고 nAbovePhysicalMaxNulled 로 공시한다 (top-level description 참조).",
+            "type": ["number", "null"],
+            "minimum": 0,
+            "maximum": 10000
+          }
+        }
+      }
+    }
+  }
+}

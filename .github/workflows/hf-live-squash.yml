@@ -1,0 +1,37 @@
+# HF Live Data — 주간 히스토리 squash (plan: supabase-polymorphic-abelson Wave 4).
+#
+# airlens-live 는 시간별 upsert 로 커밋이 누적된다 (timeline 3h + hourly 격자 +
+# predictions 3h ≈ 주 300+ 커밋). HF 공식 가이드가 "git repo 는 쓰기 많은 DB 가
+# 아니다 — 수천 커밋부터 UX 저하, super_squash 로 압축" 을 권장하므로 주간으로
+# 1커밋 압축한다. 현재 파일 트리는 보존, 히스토리만 소거 (핫 데이터라 무손실).
+# 쿼터 반영은 최대 36h 지연 (HF docs).
+name: HF Live Squash
+
+on:
+  schedule:
+    - cron: '20 19 * * 0'  # 일요일 19:20 UTC — hf-backup(일요일) 등 기존 cron 과 분리
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hf-live-squash
+  cancel-in-progress: false
+
+jobs:
+  squash:
+    if: github.repository == 'AirLens-cloud/airlens-data'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Install huggingface_hub
+        run: pip install "huggingface_hub>=0.34,<2"
+      - name: Squash history
+        run: python3 scripts/etl/hf_publish.py squash

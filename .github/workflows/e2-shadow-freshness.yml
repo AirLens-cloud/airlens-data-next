@@ -1,0 +1,78 @@
+name: E2 Shadow Freshness Probe
+
+# E2 사이드카(OpenAQ + Sensor.Community 수집)는 이 레포 밖(Oracle VM systemd 타이머)에서
+# HF openaq-shadow/ · sensor-community-shadow/ 로 직접 발행한다. 이 워크플로는 수집하지
+# 않는다 — HF 최신 슬롯 파일명 타임스탬프만 프로브해 E2 장애를 fail-loud 로 드러낸다.
+# (API 호출 0 / OpenAQ 단일 계정 준수와 무관 / 이중 발행 없음 — 2026-08-26 결정)
+#
+# 이 워크플로의 설계 전제는 "감시 대상과 다른 인프라에서 돈다"이다. GitHub hosted
+# 러너에서 도는 지금은 그 전제가 지켜진다 — 감시 대상 VM 이 죽어도 이 프로브는
+# 독립적으로 스케줄된다.
+
+on:
+  schedule:
+    - cron: '25 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.repository == 'AirLens-cloud/airlens-data'
+    # 2026-10-10 public 전환 → hosted 복귀 (public repo 의 hosted 분은 무료, self-hosted 러너는 fork 노출 위험).
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Probe latest shadow slot per feed
+        run: |
+          cat > probe.py << 'SCRIPT'
+          import json, re, sys, urllib.request
+          from datetime import datetime, timezone
+
+          DATASET = "Robeedau/airlens-live"
+          # 시간별 타이머(:05/:15) 기준 4h = 슬롯 3~4개 연속 결측부터 경보.
+          MAX_AGE_HOURS = 4
+          FEEDS = ["openaq-shadow", "sensor-community-shadow"]
+
+          def list_dir(path):
+              base = f"https://huggingface.co/api/datasets/{DATASET}/tree/main/{path}"
+              url, out = base, []
+              while url:
+                  req = urllib.request.Request(url, headers={"User-Agent": "airlens-data-probe"})
+                  resp = urllib.request.urlopen(req, timeout=30)
+                  out += [f["path"] for f in json.load(resp)]
+                  link = resp.headers.get("Link") or ""
+                  m = re.search(r'<([^>]+)>;\s*rel="next"', link)
+                  url = m.group(1) if m else None
+              return out
+
+          now = datetime.now(timezone.utc)
+          failed = False
+          for feed in FEEDS:
+              slots = []
+              for p in list_dir(feed):
+                  # 정규 슬롯 파일명 안의 YYYYMMDDHH (backfill 등 다른 이름도 매치되면 후보로 포함)
+                  for m in re.finditer(r"(20\d{8})(?:\.|-|_)", p + "."):
+                      try:
+                          slots.append(datetime.strptime(m.group(1), "%Y%m%d%H").replace(tzinfo=timezone.utc))
+                      except ValueError:
+                          pass
+              if not slots:
+                  print(f"::error title=shadow feed empty::{feed} — 슬롯 파일이 하나도 없다")
+                  failed = True
+                  continue
+              latest = max(slots)
+              age_h = (now - latest).total_seconds() / 3600
+              line = f"{feed}: latest slot {latest:%Y-%m-%d %H}Z (age {age_h:.1f}h)"
+              if age_h > MAX_AGE_HOURS:
+                  print(f"::error title=E2 shadow stale::{line} > {MAX_AGE_HOURS}h — E2 사이드카 타이머 점검 필요 (ssh ubuntu@E2, systemctl list-timers)")
+                  failed = True
+              else:
+                  print(f"OK  {line}")
+          sys.exit(1 if failed else 0)
+          SCRIPT
+          python3 probe.py

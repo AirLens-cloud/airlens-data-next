@@ -1,0 +1,55 @@
+name: mac Snapshot Healthcheck
+
+# 발행은 관대하게, 감시는 엄격하게.
+#
+# `mac-data-publish.yml` 은 소스마다 `continue-on-error: true` 라 한 소스가 죽어도
+# 나머지를 계속 발행한다 — 그건 옳다. 문제는 그래서 **워크플로가 계속 초록불**이라는
+# 것이다. CAMS 는 그 뒤에서 며칠을 죽어 있었고, 잔여작업 인벤토리는 그걸 "키 미설정 =
+# 사용자 게이트" 로 잘못 분류했다. 로그를 안 열면 알 수가 없었다.
+#
+# 그래서 감시를 **발행 워크플로 밖으로** 뺀다. 이 잡은 실제로 발행된 파일을 GET 해서
+# 상태를 본다 — 성공한 run 이 아니라 **발행물**이 판정 대상이다.
+# (`secret-sync-and-ingest-reliability.md` 의 "live 기능 probe = PRIMARY,
+# metadata 는 advisory" 패턴과 같다.)
+#
+# ⚠️ **현재는 advisory (항상 exit 0).** CAMS 가 지금 실제로 죽어 있어서, fail-loud 로
+# 켜면 첫날부터 매시간 red 다 — 경보 피로로 아무도 안 보게 된다. CAMS 수정이 착지한
+# 뒤 `ADVISORY: 'false'` 로 승격한다. 그때까지도 job summary 에는 그대로 뜬다.
+#
+# hosted 러너에서 돌므로 `mac-data-publish.yml` 과 인프라가 분리돼 "발행 워크플로
+# 밖에서 본다"는 위 설계 취지가 그대로 유지된다.
+
+on:
+  schedule:
+    - cron: '35 * * * *'   # 발행(정시)보다 35분 뒤 — 발행이 끝난 뒤를 본다
+  workflow_dispatch:
+    inputs:
+      advisory:
+        description: 'true=항상 exit 0 (기본), false=degraded 면 fail'
+        required: false
+        default: 'true'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe published mac snapshot
+    if: github.repository == 'AirLens-cloud/airlens-data'
+    # 2026-10-10 public 전환 → hosted 복귀 (public repo 의 hosted 분은 무료, self-hosted 러너는 fork 노출 위험).
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Probe
+        env:
+          # CAMS 착지 후 'false' 로 승격 (위 주석 참조).
+          ADVISORY: ${{ github.event.inputs.advisory || 'true' }}
+          MAC_SNAPSHOT_INDEX_URL: https://huggingface.co/datasets/Robeedau/airlens-live/resolve/main/mac-data/data/mac/v1/index.json
+          MAC_SNAPSHOT_MAX_AGE_HOURS: '3'
+        run: python3 scripts/etl/probe_mac_snapshot.py

@@ -1,0 +1,517 @@
+name: Hourly Data Collection (Wind + Weather + AQI)
+
+on:
+  schedule:
+    - cron: '5 */3 * * *'  # 매 3시간 :05 (2026-05-15 cron-diet: 매시간 → 매 3시간, 66% 절감, Globe markers 3h lag acceptable)
+  workflow_dispatch:
+    inputs:
+      force_aq:
+        # 예산 게이트는 발행물 나이(≥ 11h)로 판정한다(aq_budget_gate.py) — 창을 빗나간
+        # run 도 자동으로 수집한다. 이 입력은 나이와 무관하게 즉시 받아야 할 때만 쓴다.
+        # 강제 수집 1회 = 가스 2,376 + pollen 580 ≈ 3.0k 좌표 (일 한도 ~10k의 30%).
+        description: 'AQ 예산 게이트 무시하고 가스·pollen 즉시 수집 (수동 복구용)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: data-collect-hourly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect-all:
+    if: github.repository == 'AirLens-cloud/airlens-data'
+    # 2026-10-10 public 전환 → hosted 복귀 (public repo 의 hosted 분은 무료, self-hosted 러너는 fork 노출 위험).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+    steps:
+      # collect_all.py 는 inline heredoc 이라 repo 불필요했으나, AQ 수집기
+      # (scripts/etl/collect_noaa_aq.py)는 tracked 파일 → checkout 필요.
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install huggingface_hub
+        run: pip install "huggingface_hub>=0.34,<2"
+
+      # 이 스텝만 Open-Meteo(weather/marine/gas/pollen)를 친다. 아래 NOAA 수집
+      # 2종(GEFS-Aerosols AQ 격자, GFS wind)은 **완전히 독립**인데도, 이 스텝이
+      # 잡 예산 20분을 다 먹으면 함께 죽는다.
+      #
+      # 실측 (2026-09-04): 정상 4.3~4.5분 → 스로틀 시 9.5분 → 20분 초과로 잡 타임아웃.
+      # 그 실행(33859136907)에서 AQ 격자·wind·업로드가 **전부 skip** 됐다. 느린 제공자
+      # 하나가 무관한 수집기 셋을 인질로 잡은 것이다.
+      #
+      # 스텝 타임아웃 10분 = 정상치의 2배 여유. continue-on-error 로 실패를 격리하되
+      # 조용해지지는 않는다 — 이 스텝의 산출물이 계속 안 올라오면 6h SLA 를 넘겨
+      # "Verify AQ grid freshness" 프로브가 run 을 빨갛게 만든다.
+      - name: Collect all data sources
+        id: collect_all
+        timeout-minutes: 15  # 분당 한도 대기(61s×최대 4회/블록) 수용 — 2026-09-05
+        continue-on-error: true
+        env:
+          # schedule 이벤트에선 inputs 가 비어 문자열 '' → 'false' 폴백
+          FORCE_AQ: ${{ github.event.inputs.force_aq || 'false' }}
+        run: |
+          cat > collect_all.py << 'SCRIPT'
+          """
+          Unified hourly data collection: Wind + Temp/RH + AQI.
+          Server-Collect pattern: external APIs → JSON → HF dataset (Robeedau/airlens-live).
+          """
+          import json, math, time, urllib.request, sys, os
+          from datetime import datetime, timezone
+
+          # 청크 수집 정책(커버리지 공시 + 스로틀 조기 포기)은 tracked 모듈에 있다 —
+          # heredoc 안에서 네 번 복붙되던 것이라 단위 테스트가 닿지 않았다.
+          sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "etl"))
+          from openmeteo_chunks import coverage_note, fetch_chunks
+
+          STEP = 10
+          CHUNK = 30
+          # AQ(가스·pollen)만 큰 청크를 쓴다. 2026-09-04 실측: air-quality-api 가
+          # **러너 IP 에 한해** 매 청크 429 를 냈고(같은 시각 같은 엔드포인트가 다른 IP
+          # 에서는 200), weather/marine 을 치는 두 호스트는 같은 러너에서 멀쩡했다 —
+          # 즉 호출량 문제이고 AQ 호스트에 국한된다. 지점 수(=커버리지)는 그대로 두고
+          # **요청 수만** 100→15/run 으로 줄인다. API 가 요청당 290 지점까지 200 을
+          # 내는 것을 확인했고(가스 3변수·pollen 6종 각각), 여유를 두고 200 으로 잡는다.
+          # weather/marine 은 멀쩡하므로 건드리지 않는다.
+          AQ_CHUNK = 200
+          DELAY = 0.5
+          now = datetime.now(timezone.utc)
+
+          # ── AQ 호스트 일일 예산 게이트 (2026-09-05) ─────────────────────
+          # #24 가 요청 수를 100→15 로 줄였는데도 429 가 계속됐다 (09-04 실측:
+          # 가스 마지막 성공 09:18Z, 이후 온종일 **첫 청크부터** 429). Open-Meteo
+          # 무료 티어는 요청 수가 아니라 **좌표 수 가중**으로 미터링한다 — 청크
+          # 통합은 예산을 한 푼도 줄이지 않았다. 일일 가중 사용량: 가스 2,376좌표
+          # ×8run + pollen 580×8run + forecast 75도시×4run ≈ 24k ≫ 한도(~10k/일).
+          # 오전 3~4번째 run 에서 소진 → 이후 온종일 429, 같은 호스트를 치는
+          # forecast-collect 는 재시도 백오프로 15분 타임아웃까지 연쇄 사망.
+          # 그래서 가스·pollen 은 ~12h 케이던스로만 수집한다:
+          # (2,376+580)×2 + 75×4 ≈ 6.2k = 한도의 62%. weather/marine 은 다른
+          # 호스트라 게이트 밖. 노후 판정은 check_aq_grid_freshness.py 가
+          # 격자별 SLA 24h(2사이클)로 잰다 — 제품 기본 6h 를 그대로 두면
+          # 게이트 자체가 매 run 오탐을 만든다.
+          #
+          # 2026-09-27: 판정 기준을 실행 시각(`now.hour % 12 < 3`)에서 **발행물 나이**
+          # (가스 격자 ≥ 11h)로 바꿨다 — schedule 이벤트가 00Z·12Z 창을 5일 연속
+          # 빗나가 가스·pollen 이 141h 노후됐다. 근거·예산 산식 = scripts/etl/aq_budget_gate.py
+          from aq_budget_gate import aq_host_budget_run
+          AQ_HOST_BUDGET_RUN, aq_gate_reason = aq_host_budget_run(now, force=os.environ.get("FORCE_AQ") == "true")
+          print(f"AQ budget gate: {'수집' if AQ_HOST_BUDGET_RUN else 'skip'} — {aq_gate_reason}")
+          SKIPPED_COV = {"nChunksTotal": 0, "nChunksOk": 0, "nChunksFailed": 0, "throttled": False}
+
+          # Sampling grid shared by the weather/marine/gas blocks below.
+          lats = list(range(-80, 81, STEP))
+          lons = list(range(-180, 180, STEP))
+          pairs = [(lat, lon) for lat in lats for lon in lons]
+
+          # ── 1. Wind Data ──────────────────────────────────────────────
+          # Moved out to scripts/etl/collect_gfs_wind.py (NOAA GFS 1°, surface + 850hPa).
+          # This block resampled Open-Meteo's 10m winds onto a 10° grid and wrote it as
+          # "gfs-1.0" — 46× coarser than the name claimed, and surface-only, so the
+          # altitude axis had nothing to stand on.
+
+          # ── 2. Temperature + Humidity ─────────────────────────────────
+          print("=== Weather Grid ===")
+          weather_grid = {}
+          weather_urls = [
+              f"https://api.open-meteo.com/v1/forecast?latitude={','.join(str(p[0]) for p in pairs[ci:ci+CHUNK])}&longitude={','.join(str(p[1]) for p in pairs[ci:ci+CHUNK])}&current=temperature_2m,relative_humidity_2m,precipitation,cloud_cover,uv_index,pressure_msl"
+              for ci in range(0, len(pairs), CHUNK)
+          ]
+          weather_payloads, weather_cov = fetch_chunks("Weather", weather_urls, delay=DELAY)
+          for data in weather_payloads:
+              for item in (data if isinstance(data, list) else [data]):
+                  if "latitude" in item and "current" in item:
+                      weather_grid[f"{item['latitude']},{item['longitude']}"] = {
+                          "lat": item["latitude"], "lon": item["longitude"],
+                          "temp": item["current"].get("temperature_2m"),
+                          "rh": item["current"].get("relative_humidity_2m"),
+                          "precip": item["current"].get("precipitation"),
+                          "cloud": item["current"].get("cloud_cover"),
+                          "uvi": item["current"].get("uv_index"),
+                          # mslp = mean sea-level pressure (pressure_msl).
+                          # surface_pressure would be altitude-contaminated
+                          # (~600 hPa over Tibet) — wrong quantity for MSLP.
+                          "mslp": item["current"].get("pressure_msl"),
+                      }
+
+          weather_pts = list(weather_grid.values())
+          if weather_pts:
+              with open("weather-grid.json", "w") as f:
+                  json.dump({
+                      "refTime": now.isoformat(), "step": STEP, "count": len(weather_pts),
+                      **weather_cov,
+                      "points": [
+                          {"lat": p["lat"], "lon": p["lon"],
+                           "temp": round(p["temp"], 1) if p["temp"] is not None else None,
+                           "rh": p["rh"],
+                           "precip": round(p["precip"], 2) if p.get("precip") is not None else None,
+                           "cloud": p.get("cloud"),
+                           "uvi": round(p["uvi"], 1) if p.get("uvi") is not None else None,
+                           "mslp": round(p["mslp"], 1) if p.get("mslp") is not None else None}
+                          for p in weather_pts
+                      ],
+                  }, f, separators=(",", ":"))
+              print(f"  Weather: {len(weather_pts)} points")
+          else:
+              print("  Weather: 0 points — 파일을 쓰지 않는다(직전 발행분 보존)", file=sys.stderr)
+
+          # ── 3. Marine Data (SST + Waves + Currents) ──────────────────
+          print("=== Marine Data ===")
+          MARINE_STEP = 10
+          marine_lats = list(range(-60, 61, MARINE_STEP))
+          marine_lons = list(range(-180, 180, MARINE_STEP))
+          marine_pairs = [(lat, lon) for lat in marine_lats for lon in marine_lons]
+          marine_points = []
+          # Open-Meteo *Marine* API 변수 (wave_height/wave_period — GFS Wave 변수명과 다름).
+          # 과거 significant_height_of_combined_wind_waves_and_swell 요청 시 HTTP 400 → 0점.
+          marine_vars = "sea_surface_temperature,wave_height,wave_period,ocean_current_velocity,ocean_current_direction"
+
+          marine_urls = [
+              f"https://marine-api.open-meteo.com/v1/marine?latitude={','.join(str(p[0]) for p in marine_pairs[ci:ci+CHUNK])}&longitude={','.join(str(p[1]) for p in marine_pairs[ci:ci+CHUNK])}&current={marine_vars}"
+              for ci in range(0, len(marine_pairs), CHUNK)
+          ]
+          marine_payloads, marine_cov = fetch_chunks("Marine", marine_urls, delay=DELAY)
+          for data in marine_payloads:
+              for item in (data if isinstance(data, list) else [data]):
+                  if "latitude" in item and "current" in item:
+                      c = item["current"]
+                      marine_points.append({
+                          "lat": item["latitude"], "lon": item["longitude"],
+                          "sst": c.get("sea_surface_temperature"),
+                          "waves": c.get("wave_height"),
+                          "wave_period": c.get("wave_period"),
+                          "current_vel": c.get("ocean_current_velocity"),
+                          "current_dir": c.get("ocean_current_direction"),
+                      })
+
+          if marine_points:
+              with open("marine-data.json", "w") as f:
+                  json.dump({"refTime": now.isoformat(), "collected_at": now.isoformat(), "step": MARINE_STEP, "count": len(marine_points), **marine_cov, "points": marine_points}, f, separators=(",", ":"))
+              print(f"  Marine: {len(marine_points)} points")
+          else:
+              print("  Marine: 0 points — 파일을 쓰지 않는다(직전 발행분 보존)", file=sys.stderr)
+
+          # ── 5. AQ Gas Grid (O3/NO2/CO via Open-Meteo) ──────────────
+          # PM2.5/PM10 = NOAA GEFS-Aerosols (scripts/etl/collect_noaa_aq.py, US public domain).
+          # 가스(O3/NO2/CO)는 NOAA aerosol 모델에 없음 → Open-Meteo (CAMS) 로 수집.
+          # 비상업 데이터 viz 사이트라 무키 free 티어 합법. **광고 도입 시 = 상업 →
+          # 가스를 CAMS-direct/GEOS-CF 로 교체하거나 Open-Meteo 구독 (plan §광고-미래 트리거).**
+          print("=== AQ Gas Grid (O3/NO2/CO via Open-Meteo) ===")
+          AQ_STEP = 5
+          aq_lats = list(range(-80, 81, AQ_STEP))
+          aq_lons = list(range(-180, 180, AQ_STEP))
+          aq_pairs = [(lat, lon) for lat in aq_lats for lon in aq_lons]
+          gas_variables = {
+              "ozone": [],
+              "nitrogen_dioxide": [],
+              "carbon_monoxide": [],
+          }
+          var_s = ",".join(gas_variables.keys())
+          gas_urls = [
+              f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={','.join(str(p[0]) for p in aq_pairs[ci:ci+AQ_CHUNK])}&longitude={','.join(str(p[1]) for p in aq_pairs[ci:ci+AQ_CHUNK])}&current={var_s}"
+              for ci in range(0, len(aq_pairs), AQ_CHUNK)
+          ]
+          if AQ_HOST_BUDGET_RUN:
+              gas_payloads, gas_cov = fetch_chunks("Gas grid", gas_urls, delay=DELAY)
+          else:
+              # 예산 게이트 skip 은 실패가 아니다 — nChunksFailed=0 이라
+              # coverage_note 도 조용하다. 직전 발행분이 그대로 서빙된다.
+              gas_payloads, gas_cov = [], dict(SKIPPED_COV)
+              print("  Gas grid: 예산 게이트 — 이 run 은 수집하지 않는다 (발행물 < 11h; 직전 발행분 유지)")
+          for data in gas_payloads:
+              for item in (data if isinstance(data, list) else [data]):
+                  if "latitude" in item and "current" in item:
+                      c = item["current"]
+                      for var_name in gas_variables:
+                          val = c.get(var_name)
+                          if val is not None and not (isinstance(val, float) and (math.isnan(val) or math.isinf(val))):
+                              gas_variables[var_name].append({
+                                  "lat": item["latitude"],
+                                  "lon": item["longitude"],
+                                  "value": round(val, 2),
+                              })
+
+          gas_file_map = {
+              "ozone": "current-o3-grid",
+              "nitrogen_dioxide": "current-no2-grid",
+              "carbon_monoxide": "current-co-grid",
+          }
+          for var_name, file_prefix in gas_file_map.items():
+              pts = gas_variables[var_name]
+              # pollen 과 같은 이유로 빈 격자는 쓰지 않는다 — 세 가스 격자도 값을
+              # 받은 셀만 append 하므로, 업스트림이 전부 거절하면 0 점이 된다.
+              # `continue` 가 아니라 `if pts:` 로 감싸는 이유: 네 격자군의 가드 구조를
+              # 같게 두면 heredoc 구조 테스트가 "쓰기는 전부 조건 아래" 하나로 끝난다.
+              #
+              # 다만 `if pts:` 는 **붕괴만** 잡는다 — 1 점만 살아도 통과한다. 2026-09-04
+              # 09:18Z run 에서 가스 3종은 2196→1980 점(−10%)으로 감쇠한 채 "완전한
+              # 격자"로 발행됐다. 그래서 커버리지(`**gas_cov`)를 payload 에 실어
+              # **부분을 부분이라고 말하게** 한다. 커버리지 하한은 걸지 않는다 —
+              # 근거 없는 임계값은 그 자체가 새 거짓말이다.
+              if pts:
+                  grid_data = {
+                      "variable": var_name,
+                      "resolution": AQ_STEP,
+                      "timestamp": int(now.timestamp() * 1000),
+                      "nLat": len(aq_lats),
+                      "nLon": len(aq_lons),
+                      "latMin": aq_lats[0],
+                      "lonMin": aq_lons[0],
+                      "dLat": AQ_STEP,
+                      "dLon": AQ_STEP,
+                      **gas_cov,
+                      "points": pts,
+                      "source": "Open-Meteo (CAMS)",
+                  }
+                  with open(f"{file_prefix}.json", "w") as f:
+                      json.dump(grid_data, f, separators=(",", ":"))
+                  print(f"  {var_name}: {len(pts)} points -> {file_prefix}.json")
+              elif AQ_HOST_BUDGET_RUN:
+                  # 게이트로 skip 한 run 에서는 0 점이 정상이라 이 경고를 내지 않는다.
+                  print(f"  {var_name}: 0 points — 파일을 쓰지 않는다(직전 발행분 보존)", file=sys.stderr)
+
+          # ── 6. Pollen Grid (Europe / Open-Meteo CAMS) ──────────────
+          # 6 species in grains/m³. CAMS pollen domain = Europe only → grid bounded to
+          # the CAMS extent (lat 34..72, lon -12..45). Points outside return null and are
+          # dropped, so the frontend renders nothing outside coverage (honest gaps).
+          # Same free-tier / commercial caveat as the gas grid above.
+          print("=== Pollen Grid (Europe via Open-Meteo CAMS) ===")
+          POLLEN_STEP = 2
+          pollen_lats = list(range(34, 73, POLLEN_STEP))
+          pollen_lons = list(range(-12, 46, POLLEN_STEP))
+          pollen_pairs = [(lat, lon) for lat in pollen_lats for lon in pollen_lons]
+          pollen_species = ["grass_pollen", "birch_pollen", "alder_pollen", "mugwort_pollen", "olive_pollen", "ragweed_pollen"]
+          pollen_points = []
+          pvar_s = ",".join(pollen_species)
+          pollen_urls = [
+              f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={','.join(str(p[0]) for p in pollen_pairs[ci:ci+AQ_CHUNK])}&longitude={','.join(str(p[1]) for p in pollen_pairs[ci:ci+AQ_CHUNK])}&current={pvar_s}"
+              for ci in range(0, len(pollen_pairs), AQ_CHUNK)
+          ]
+          if AQ_HOST_BUDGET_RUN:
+              pollen_payloads, pollen_cov = fetch_chunks("Pollen", pollen_urls, delay=DELAY)
+          else:
+              pollen_payloads, pollen_cov = [], dict(SKIPPED_COV)
+              print("  Pollen: 예산 게이트 — 이 run 은 수집하지 않는다 (발행물 < 11h; 직전 발행분 유지)")
+          for data in pollen_payloads:
+              for item in (data if isinstance(data, list) else [data]):
+                  if "latitude" not in item or "current" not in item:
+                      continue
+                  c = item["current"]
+                  rec = {"lat": item["latitude"], "lon": item["longitude"]}
+                  any_val = False
+                  for sp in pollen_species:
+                      val = c.get(sp)
+                      if val is not None and not (isinstance(val, float) and (math.isnan(val) or math.isinf(val))):
+                          rec[sp.replace("_pollen", "")] = round(val, 1)
+                          any_val = True
+                  if any_val:
+                      pollen_points.append(rec)
+
+          # 0 점이면 파일을 쓰지 않는다 — 업로드 루프가 `[ -f ]` 로 거르므로 직전
+          # 정상 발행분이 그대로 남는다(guard_no_empty_replace 정신). 실측 사고
+          # 2026-09-04: Open-Meteo 가 모든 청크를 거절한 실행이 count=0 파일을 써서
+          # 461점짜리 멀쩡한 격자를 덮었다. 신선도 프로브는 발행 *후* 를 보므로
+          # 잡긴 하되 이미 늦다 — 빈 격자는 애초에 산출물이 아니다.
+          # 수집이 정말 계속 실패하면 옛 파일이 SLA(가스·pollen 24h)를 넘겨 프로브가 빨갛게 만든다.
+          if pollen_points:
+              with open("pollen-grid.json", "w") as f:
+                  json.dump({"refTime": now.isoformat(), "collected_at": now.isoformat(), "step": POLLEN_STEP, "count": len(pollen_points), **pollen_cov, "source": "Open-Meteo (CAMS, Europe)", "points": pollen_points}, f, separators=(",", ":"))
+              print(f"  Pollen: {len(pollen_points)} points -> pollen-grid.json")
+          elif AQ_HOST_BUDGET_RUN:
+              print("  Pollen: 0 points — 파일을 쓰지 않는다(직전 발행분 보존). 업스트림 거절/스로틀 의심", file=sys.stderr)
+
+          # 부분 수집을 annotation 으로 드러낸다 — 파일 안 nChunksFailed 만으로는
+          # 아무도 안 본다(#20 의 "격리가 침묵이 되면 안 된다"와 같은 이유).
+          for label, cov in (("Weather", weather_cov), ("Marine", marine_cov), ("Gas grid", gas_cov), ("Pollen", pollen_cov)):
+              note = coverage_note(label, cov)
+              if note:
+                  print(note)
+
+          print(f"\nDone: weather={len(weather_pts)}, marine={len(marine_points)}, gas={sum(len(v) for v in gas_variables.values())}, pollen={len(pollen_points)} (PM2.5/PM10 -> collect_noaa_aq.py, wind -> collect_gfs_wind.py)")
+          print(f"Chunk coverage: weather={weather_cov}, marine={marine_cov}, gas={gas_cov}, pollen={pollen_cov}")
+          SCRIPT
+          python3 collect_all.py
+
+      # 위 스텝은 continue-on-error 다 — 격리가 침묵이 되면 안 되므로 결과를 명시한다.
+      # 하드 게이트가 아닌 이유: Open-Meteo 산출물(weather/marine/gas/pollen)이 계속
+      # 안 올라오면 노후 SLA 프로브가 6h 안에 run 을 빨갛게 만든다. 여기서 곧장 실패시키면
+      # 스로틀 한 번에 무관한 NOAA 수집까지 다시 인질이 된다 — 그게 이 변경의 발단이다.
+      - name: Report slow-provider outcome
+        if: always()
+        env:
+          OUTCOME: ${{ steps.collect_all.outcome }}
+        run: |
+          if [ "$OUTCOME" != "success" ]; then
+            echo "::warning title=Open-Meteo collection ${OUTCOME}::weather/marine/gas/pollen 갱신 없이 진행한다(직전 발행분 유지). 반복되면 노후 SLA 프로브가 빨갛게 만든다."
+          else
+            echo "::notice title=Open-Meteo collection ok::success"
+          fi
+
+      # hosted 는 매 run 새 VM — apt install 을 재시도 포함해 먼저 시도하고, 실패할 때만
+      # update 후 재설치한다. 별도 스텝이라 apt 실패가 수집 실패와 구분돼 보인다.
+      - name: Install system deps (eccodes — grib_get_data for GEFS decode)
+        run: |
+          command -v grib_get_data >/dev/null || sudo apt-get install -y -qq -o Acquire::Retries=3 libeccodes-tools || { sudo apt-get update -qq -o Acquire::Retries=3 && sudo apt-get install -y -qq -o Acquire::Retries=3 libeccodes-tools; }
+
+      - name: Collect AQ grid (NOAA GEFS-Aerosols, free + commercial-OK)
+        run: |
+          python3 scripts/etl/collect_noaa_aq.py
+
+      # Depends on the eccodes install step above (grib_get_data).
+      # Fails the run if either level is missing — 850hPa must never hold surface data.
+      - name: Collect wind grid (NOAA GFS 1°, surface + 850hPa)
+        run: python3 scripts/etl/collect_gfs_wind.py
+
+      - name: Upload latest snapshots to HF
+        run: |
+          for FILE in weather-grid marine-data \
+                      wind-surface wind-850hpa wind-surface-2deg wind-850hpa-2deg; do
+            if [ -f "${FILE}.json" ]; then
+              python3 scripts/etl/hf_publish.py upload \
+                --src "${FILE}.json" --dest "wind-data/${FILE}.json" \
+                || { echo "::error title=HF upload failed::${FILE} — 이 파일은 옛 버전이 그대로 발행된다"; UPLOAD_FAILED=1; }
+            fi
+          done
+          # 루프 안에서 즉시 죽지 않는다: 한 파일이 실패해도 나머지는 올려야 한다.
+          # 그러나 조용히 넘기지도 않는다 — 하나라도 실패하면 run 은 빨갛다.
+          # (스텝마다 셸이 다르므로 게이트는 루프가 있는 스텝마다 따로 있어야 한다.)
+          if [ "${UPLOAD_FAILED:-0}" = "1" ]; then
+            echo "::error title=HF upload incomplete::위 annotation 의 파일은 갱신되지 않았다 (옛 데이터 발행 중)"
+            exit 1
+          fi
+
+      - name: Upload AQ grid data to HF
+        run: |
+          for FILE in current-pm25-grid current-pm10-grid current-o3-grid current-no2-grid current-co-grid pollen-grid; do
+            if [ -f "${FILE}.json" ]; then
+              # 계약은 collect_noaa_aq.py 가 만든 두 격자에만 건다. o3/no2/co/pollen
+              # 은 collect_all.py(Open-Meteo) 산출이라 모양이 다르다 — 남의 계약을
+              # 씌우면 정상 발행이 죽는다.
+              # 배열로 넘긴다 — 무따옴표 ${VAR} 전개(word splitting)에 기대면
+              # 값에 공백이 들어가는 순간 조용히 깨진다 (SC2086).
+              SCHEMA_ARGS=()
+              case "$FILE" in
+                current-pm25-grid|current-pm10-grid) SCHEMA_ARGS=(--schema current-aq-grid.v1) ;;
+              esac
+              python3 scripts/etl/hf_publish.py upload \
+                --src "${FILE}.json" --dest "aq-data/${FILE}.json" "${SCHEMA_ARGS[@]}" \
+                || { echo "::error title=HF upload failed::${FILE} — 이 파일은 옛 버전이 그대로 발행된다"; UPLOAD_FAILED=1; }
+            fi
+          done
+          # 루프 안에서 즉시 죽지 않는다: 한 파일이 실패해도 나머지는 올려야 한다.
+          # 그러나 조용히 넘기지도 않는다 — 하나라도 실패하면 run 은 빨갛다.
+          # (스텝마다 셸이 다르므로 게이트는 루프가 있는 스텝마다 따로 있어야 한다.)
+          if [ "${UPLOAD_FAILED:-0}" = "1" ]; then
+            echo "::error title=HF upload incomplete::위 annotation 의 파일은 갱신되지 않았다 (옛 데이터 발행 중)"
+            exit 1
+          fi
+
+      # 24h PM2.5 history summary 제거됨 (2026-07-01): data_type='aqi' 적재가
+      # 2026-04-28 deprecated → weather_history에 aqi row 0 + 라이브 프론트 미사용
+      # (pm25-history-24h.json 소비처 없음). 쿼리는 URL 인코딩 버그로 HTTP 400만 반복.
+
+      - name: Verify uploads
+        env:
+          HF_LIVE_BASE: https://huggingface.co/datasets/Robeedau/airlens-live/resolve/main
+        run: |
+          # -L: HF resolve 가 향후 LFS 임계값을 넘는 파일에서 302 리다이렉트를 낼 수 있다.
+          for FILE in wind-surface wind-850hpa weather-grid; do
+            curl -sL -o /dev/null -w "  ${FILE}: HTTP %{http_code}\n" \
+              "${HF_LIVE_BASE}/wind-data/${FILE}.json"
+          done
+          for FILE in current-pm25-grid current-pm10-grid current-o3-grid current-no2-grid current-co-grid pollen-grid; do
+            curl -sL -o /dev/null -w "  ${FILE}: HTTP %{http_code}\n" \
+              "${HF_LIVE_BASE}/aq-data/${FILE}.json"
+          done
+
+      # HTTP 200 only proves a file exists — it can be months stale and still serve.
+      # Read it back and measure generatedAt (refTime lags by hours by design, so it
+      # is not a health signal). Fail loud; a silently frozen wind field is worse than
+      # a red cron.
+      - name: Verify wind freshness (live probe)
+        if: always()
+        env:
+          MAX_WIND_STALENESS_HOURS: "6"   # collected every 3h; 6h = two missed cycles
+        run: |
+          cat > check_wind_freshness.py << 'SCRIPT'
+          import json, os, sys, urllib.request, urllib.error
+          from datetime import datetime, timezone
+
+          base = "https://huggingface.co/datasets/Robeedau/airlens-live/resolve/main/wind-data"
+          max_hours = float(os.environ["MAX_WIND_STALENESS_HOURS"])
+          failed = False
+
+          for slug in ("wind-surface", "wind-850hpa"):
+              url = f"{base}/{slug}.json"
+              try:
+                  raw = urllib.request.urlopen(url, timeout=60).read().decode("utf-8")
+              except urllib.error.HTTPError as e:
+                  if e.code == 404:  # first-ever run: baseline not established
+                      print(f"::warning title=Wind freshness::{slug} not uploaded yet (404) — baseline pending")
+                      continue
+                  print(f"::error title=Wind freshness::{slug} read failed HTTP {e.code}", file=sys.stderr)
+                  failed = True
+                  continue
+              except Exception as e:  # noqa: BLE001
+                  print(f"::error title=Wind freshness::{slug} probe failed: {e}", file=sys.stderr)
+                  failed = True
+                  continue
+
+              try:
+                  recs = json.loads(raw)
+                  hdr = recs[0]["header"]
+                  gen = hdr["generatedAt"]   # 파이프라인 마지막 성공 실행 시각(건강 신호)
+              except (ValueError, KeyError, IndexError) as e:
+                  print(f"::error title=Wind freshness::{slug} missing/invalid generatedAt: {e}", file=sys.stderr)
+                  failed = True
+                  continue
+
+              expected = hdr["nx"] * hdr["ny"]
+              for k, rec in enumerate(recs[:2]):
+                  if len(rec["data"]) != expected:
+                      print(f"::error title=Wind grid::{slug} record {k} has {len(rec['data'])} cells (expected {expected})", file=sys.stderr)
+                      failed = True
+
+              gen_dt = datetime.fromisoformat(gen.replace("Z", "+00:00"))
+              if gen_dt.tzinfo is None:
+                  gen_dt = gen_dt.replace(tzinfo=timezone.utc)
+              age_h = (datetime.now(timezone.utc) - gen_dt).total_seconds() / 3600
+              print(f"{slug}: generatedAt={gen} age={age_h:.1f}h refTime={hdr.get('refTime')} level={hdr.get('level')}")
+
+              if age_h > max_hours:
+                  print(f"::error title=Wind stale::{slug} generatedAt is {age_h:.1f}h old (> {max_hours}h SLA) — GFS wind collection is failing silently", file=sys.stderr)
+                  failed = True
+              else:
+                  print(f"::notice title=Wind fresh::{slug} {age_h:.1f}h old (within {max_hours}h SLA)")
+
+          sys.exit(1 if failed else 0)
+          SCRIPT
+          python3 check_wind_freshness.py
+
+      # AQ 격자에는 이 프로브가 없었다 — wind 만 있었고, `publish_contracts.py` 의
+      # freshnessSlaReason 이 그 갭을 스스로 기록해 두고 있었다. PR #15 가
+      # `generatedAt` 을 실으면서 가능해졌다 (timestamp 는 사이클 유효시각이라
+      # 수집이 멈춰도 안 움직인다 — 건강 신호가 아니다).
+      #
+      # wind 와 달리 워크플로 인라인이 아니라 tracked 스크립트다: 프로브 자체가
+      # 고장 나면(예외를 삼키고 늘 0 반환) 아무도 모른 채 green 이 계속 찍히므로,
+      # 판정 로직을 순수 함수로 빼서 pr-check 의 pytest 가 red/green 을 실증한다.
+      - name: Verify AQ grid freshness (live probe)
+        if: always()
+        env:
+          MAX_AQ_STALENESS_HOURS: "6"   # collected every 3h; 6h = two missed cycles
+        # `--product aq-data` 를 명시한다. 프로브는 web/v1 도 볼 줄 알지만, 그건
+        # mac-data-publish.yml 이 발행하는 제품이다 — 여기서 함께 판정하면 남의
+        # 파이프라인 고장이 이 run 을 빨갛게 만든다(#20 에서 끊어낸 결합의 재현).
+        run: python3 scripts/etl/check_aq_grid_freshness.py --product aq-data

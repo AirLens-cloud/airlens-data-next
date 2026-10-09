@@ -1,0 +1,129 @@
+name: FIRMS Fire Hotspot Collection (6h)
+
+on:
+  schedule:
+    - cron: '15 */6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: firms-collect
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect-firms:
+    if: github.repository == 'AirLens-cloud/airlens-data'
+    # 2026-10-10 public 전환 → hosted 복귀 (public repo 의 hosted 분은 무료, self-hosted 러너는 fork 노출 위험).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # Freshness SLA: cron runs every 6h, so tolerate ~2 consecutive soft-skips
+      # and fail loud on the 3rd. If the stored active-fires.json is older than
+      # this, a recurring transient outage (e.g. [Errno 101] Network is
+      # unreachable) is silently going stale — surface it instead of a green run.
+      MAX_STALENESS_HOURS: "18"
+
+    steps:
+      # 레포 체크아웃이 필요하다 — 수집 로직이 이 워크플로의 heredoc 에서
+      # scripts/etl/collect_firms.py 로 옮겨졌다 (테스트 가능한 단일 정본).
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # 파이썬 버전을 3.11 로 고정한다 (시스템 python3.12 는 PEP 668 externally-managed 라
+      # bare `pip install` 이 거부될 수 있다 — run 33492216197).
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.11'
+
+      # 수집기 본문·주석·가드는 scripts/etl/collect_firms.py 에 있고
+      # scripts/etl/test_collect_firms.py (CI: pr-check etl-tests) 가 시험한다.
+      # 인라인 heredoc 이던 시절 그 로직엔 어떤 스위트도 닿지 않았고, 그 사각에서
+      # 2026-07-30 에 "HTTP 200 + 파싱 0건" 이 발행 데이터 17356건을 0건으로 덮었다.
+      - name: Collect FIRMS fire data
+        env:
+          NASA_FIRMS_MAP_KEY: ${{ secrets.NASA_FIRMS_MAP_KEY }}
+        run: python3 scripts/etl/collect_firms.py --out active-fires.json
+
+      - name: Install huggingface_hub
+        run: python3 -m pip install --quiet "huggingface_hub>=0.34,<2"
+
+      # Supabase Storage(wind-data 버킷) 업로드였다가 HF dataset repo 로 전환
+      # (2026-08-20, Supabase 402 Storage 탈출 Track 1 W1). frontend-data-sync.yml 은
+      # 이미 HF 의 wind-data/active-fires.json 을 읽고 있었으므로 이 전환으로
+      # 발행-소비 불일치가 닫힌다. hf_publish.py 는 빈 파일 업로드를 거부한다
+      # (2026-07-30 "count=0 이 17356건을 덮은" 사고 재발 방지와 같은 정신).
+      - name: Upload to HF dataset repo (wind-data/active-fires.json)
+        run: |
+          if [ ! -f active-fires.json ]; then
+            echo "발행할 payload 가 없다 (soft-skip 또는 0행 중단) — 업로드 생략"
+            exit 0
+          fi
+          python3 scripts/etl/hf_publish.py upload \
+            --src active-fires.json --dest wind-data/active-fires.json \
+            || { echo "::error title=HF upload failed::wind-data/active-fires.json — 옛 버전이 그대로 발행된다"; exit 1; }
+
+      - name: Verify freshness (live probe)
+        if: always()
+        run: |
+          cat > check_freshness.py << 'SCRIPT'
+          import json, os, sys, urllib.request, urllib.error
+          from datetime import datetime, timezone
+
+          # Supabase Storage 에서 HF dataset repo 로 전환(2026-08-20) — 업로드 스텝과
+          # 같은 대상을 읽어야 게이트가 게이트다. 2026-07-30 사고(캐시된 옛 사본을 읽고
+          # 통과)의 교훈대로 매 실행 고유 쿼리 + no-cache 를 유지한다 (HF resolve 는
+          # 미지의 쿼리스트링을 무시하므로 무해하고 캐시 키만 갈린다).
+          cache_bust = os.environ.get("GITHUB_RUN_ID", "local") + "-" + os.environ.get("GITHUB_RUN_ATTEMPT", "1")
+          url = (
+              "https://huggingface.co/datasets/Robeedau/airlens-live/resolve/main/"
+              f"wind-data/active-fires.json?cb={cache_bust}"
+          )
+          max_hours = float(os.environ["MAX_STALENESS_HOURS"])
+
+          try:
+              req = urllib.request.Request(url, headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+              raw = urllib.request.urlopen(req, timeout=30).read().decode("utf-8")
+          except urllib.error.HTTPError as e:
+              if e.code == 404:  # first-ever run: baseline not established yet — don't false-fail
+                  print("::warning title=FIRMS freshness::no active-fires.json yet (404) — baseline pending")
+                  sys.exit(0)
+              print(f"::error title=FIRMS freshness::read failed HTTP {e.code} {e.reason}", file=sys.stderr)
+              sys.exit(1)
+          except Exception as e:
+              print(f"::error title=FIRMS freshness::probe request failed: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          try:
+              data = json.loads(raw)
+              ref = data["refTime"]
+          except (ValueError, KeyError) as e:
+              print(f"::error title=FIRMS freshness::stored object missing/invalid refTime: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          ref_dt = datetime.fromisoformat(ref)  # collector writes an offset-aware +00:00 timestamp
+          if ref_dt.tzinfo is None:
+              ref_dt = ref_dt.replace(tzinfo=timezone.utc)
+          age_h = (datetime.now(timezone.utc) - ref_dt).total_seconds() / 3600
+          print(f"stored refTime={ref} age={age_h:.1f}h count={data.get('count', '?')} threshold={max_hours}h")
+
+          if age_h > max_hours:
+              print(f"::error title=FIRMS stale::active-fires.json is {age_h:.1f}h old (> {max_hours}h SLA) — FIRMS collection is failing silently (errno 101 recurrence?)", file=sys.stderr)
+              sys.exit(1)
+
+          # 신선함만 재면 "방금 쓴 빈 객체" 가 초록불을 받는다 — 나이 게이트를 통과하는
+          # count=0 이 정확히 그 구멍이었다. 발행물이 실제로 쓸 수 있는지도 같이 잰다.
+          count = data.get("count")
+          if not isinstance(count, int) or count <= 0:
+              print(
+                  f"::error title=FIRMS empty::active-fires.json is fresh ({age_h:.1f}h) but count={count!r} "
+                  "— 전지구 다일치가 0건일 수는 없다. 소비처(Globe 화재/연기/수송 arc)는 빈 배열을 받는다.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          print(f"::notice title=FIRMS fresh::active-fires.json {age_h:.1f}h old, count={count} (within {max_hours}h SLA)")
+          SCRIPT
+          python3 check_freshness.py

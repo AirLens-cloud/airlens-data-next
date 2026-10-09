@@ -1,0 +1,43 @@
+name: Workflow Keepalive
+
+# public 레포는 60일간 repository activity 가 없으면 예약(schedule) 워크플로가 자동으로
+# 비활성화된다(state=disabled_inactivity, GitHub 문서). 이 레포의 수집 워크플로는 전부
+# schedule 기반이라 한번 꺼지면 조용히 수집이 멈춘다. 이 잡이 월 2회 전체 워크플로의
+# 상태를 찍고, 비활성(inactivity) 건은 경고 후 다시 켠다. 수동으로 꺼둔
+# (disabled_manually) 워크플로는 의도된 상태이므로 건드리지 않는다.
+# 커밋·기타 부작용 없음 (actions: write 만 사용).
+#
+# 참고: 이 워크플로 자체도 꺼질 수 있으므로, 예정된 외부 워치독이 워크플로 state 가
+# disabled_inactivity 인지도 함께 점검해야 한다.
+
+on:
+  schedule:
+    - cron: '17 3 1,15 * *'  # 매월 1일·15일 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  keepalive:
+    if: github.repository == 'AirLens-cloud/airlens-data'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Re-enable inactivity-disabled workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${REPO}/actions/workflows" \
+            --jq '.workflows[] | [.id, .state, .path] | @tsv' > workflows.tsv
+          while IFS=$'\t' read -r id state path; do
+            echo "${path} (${id}): ${state}"
+            if [ "${state}" = "disabled_inactivity" ]; then
+              echo "::warning title=Workflow disabled by inactivity::${path} 가 60일 비활동으로 꺼져 있었다 — 다시 켠다."
+            fi
+            if [ "${state}" != "disabled_manually" ]; then
+              gh api -X PUT "repos/${REPO}/actions/workflows/${id}/enable"
+            fi
+          done < workflows.tsv

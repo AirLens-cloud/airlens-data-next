@@ -1,0 +1,42 @@
+[Unit]
+Description=AirLens OpenAQ global observation shadow (Wave 1 sidecar, global pivot)
+Documentation=https://github.com/AirLens-cloud/AirLens
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/airlens/sidecar
+ExecStart=/usr/local/bin/run-global-shadow.sh openaq
+
+# Secrets as files, never as literals (systemd LoadCredential pattern).
+LoadCredential=hf_token:/etc/airlens/hf_token
+LoadCredential=openaq_api_key:/etc/airlens/openaq_api_key
+
+Environment=AIRLENS_ROOT=/opt/airlens
+Environment=AIRLENS_SHADOW_OUT=/var/lib/airlens/shadow
+Environment=DENO_DIR=/opt/airlens/deno-cache
+# hf_hub 1.x xet uploader needs a writable cache; HOME is sealed by ProtectHome.
+Environment=HF_HOME=/var/lib/airlens/hf-home
+
+# 1GB box: keep any OOM inside this unit's cgroup (sshd must survive).
+MemoryAccounting=yes
+MemoryHigh=350M
+MemoryMax=400M
+
+# One retry absorbs a transient blip; the next hourly slot is the real retry.
+Restart=on-failure
+RestartSec=90s
+StartLimitBurst=2
+TimeoutStartSec=10min
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/airlens /opt/airlens/deno-cache
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes

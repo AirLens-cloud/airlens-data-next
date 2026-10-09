@@ -1,0 +1,110 @@
+name: Timeline Collect (GEFS PM2.5 ±24h)
+
+# Globe P8 — 지구본 타임라인 슬라이더용 PM2.5 격자 프레임(−24h…+24h, 3h 스텝).
+# 소스 = NOAA GEFS-Aerosols(공개도메인·상업OK·secret 0). Server-Collect: S3 GRIB → JSON grid → Storage.
+# 프레임은 Storage-only(git 커밋 회피 — 볼륨). frontend 는 aq-data/timeline/manifest.json 스냅.
+
+on:
+  schedule:
+    - cron: '35 */3 * * *'  # 매 3시간 :35 (data-collect :05 와 분리, GEFS a2d 발행 여유)
+  workflow_dispatch:
+
+concurrency:
+  group: timeline-collect
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect-timeline:
+    # fork PR 은 schedule/dispatch 를 트리거 못하지만, 베이스 repo 한정 명시(방어).
+    if: github.repository == 'AirLens-cloud/airlens-data'
+    # 2026-10-10 public 전환 → hosted 복귀 (public repo 의 hosted 분은 무료, self-hosted 러너는 fork 노출 위험).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # Freshness SLA: cron 3h → 정상 generatedAt 나이 <3h. 연속 소프트실패 2회 흡수 후
+      # 3회째 fail-loud(9h). refTime(=GEFS cycle 시각)은 발행 지연으로 상시 ~6-8h 뒤라
+      # 건강 신호가 아님 — 파이프라인이 도는지는 generatedAt 로 잰다(green≠working 회피).
+      MAX_STALENESS_HOURS: "9"
+      MIN_FRAMES: "5"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.11'
+
+      # hosted 는 매 run 새 VM — apt install 을 재시도 포함해 먼저 시도하고, 실패할 때만
+      # update 후 재설치한다(매번 update 하면 미러 동기화 중 "File has unexpected size" 위험).
+      - name: Install eccodes (GRIB decode) + huggingface_hub
+        run: |
+          command -v grib_get_data >/dev/null || sudo apt-get install -y -qq -o Acquire::Retries=3 libeccodes-tools || { sudo apt-get update -qq -o Acquire::Retries=3 && sudo apt-get install -y -qq -o Acquire::Retries=3 libeccodes-tools; }
+          pip install "huggingface_hub>=0.34,<2"
+
+      - name: Collect GEFS timeline frames (PM2.5 ±24h, 3h step)
+        run: python3 scripts/etl/collect_gefs_timeline.py
+
+      - name: Upload timeline frames + manifest to HF dataset repo
+        run: |
+          if [ ! -f timeline/manifest.json ]; then
+            echo "::error title=Timeline::no manifest produced — collector failed" >&2
+            exit 1
+          fi
+          python3 scripts/etl/hf_publish.py upload --src timeline --dest aq-data/timeline \
+            || { echo "::error title=HF upload failed::aq-data/timeline — 이 파일들은 옛 버전이 그대로 발행된다"; exit 1; }
+
+      - name: Prune stale timeline frames (>30d)
+        run: python3 scripts/etl/hf_publish.py prune --prefix aq-data/timeline --keep-days 30
+
+      - name: Verify freshness (live probe)
+        if: always()
+        run: |
+          cat > check_freshness.py << 'SCRIPT'
+          import json, os, sys, urllib.request, urllib.error
+          from datetime import datetime, timezone
+
+          url = "https://huggingface.co/datasets/Robeedau/airlens-live/resolve/main/aq-data/timeline/manifest.json"
+          max_hours = float(os.environ["MAX_STALENESS_HOURS"])
+          min_frames = int(os.environ["MIN_FRAMES"])
+
+          try:
+              raw = urllib.request.urlopen(url, timeout=30).read().decode("utf-8")
+          except urllib.error.HTTPError as e:
+              if e.code == 404:  # first-ever run: baseline not established — don't false-fail
+                  print("::warning title=Timeline freshness::no manifest yet (404) — baseline pending")
+                  sys.exit(0)
+              print(f"::error title=Timeline freshness::read failed HTTP {e.code} {e.reason}", file=sys.stderr)
+              sys.exit(1)
+          except Exception as e:  # noqa: BLE001
+              print(f"::error title=Timeline freshness::probe request failed: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          try:
+              data = json.loads(raw)
+              gen = data["generatedAt"]  # 파이프라인 마지막 성공 실행 시각(건강 신호)
+          except (ValueError, KeyError) as e:
+              print(f"::error title=Timeline freshness::manifest missing/invalid generatedAt: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          gen_dt = datetime.fromisoformat(gen.replace("Z", "+00:00"))
+          if gen_dt.tzinfo is None:
+              gen_dt = gen_dt.replace(tzinfo=timezone.utc)
+          age_h = (datetime.now(timezone.utc) - gen_dt).total_seconds() / 3600
+          nframes = len(data.get("frames", []))
+          print(f"generatedAt={gen} age={age_h:.1f}h frames={nframes} refTime={data.get('refTime')} threshold={max_hours}h")
+
+          if age_h > max_hours:
+              print(f"::error title=Timeline stale::manifest generatedAt is {age_h:.1f}h old (> {max_hours}h SLA) — GEFS timeline collection is failing silently", file=sys.stderr)
+              sys.exit(1)
+          if nframes < min_frames:
+              print(f"::error title=Timeline sparse::only {nframes} frames (< {min_frames}) — GEFS fetch degraded", file=sys.stderr)
+              sys.exit(1)
+          print(f"::notice title=Timeline fresh::manifest {age_h:.1f}h old, {nframes} frames (within {max_hours}h SLA)")
+          SCRIPT
+          python3 check_freshness.py

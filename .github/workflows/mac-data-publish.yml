@@ -1,0 +1,460 @@
+name: Mac Free Global AQ Snapshot Publish
+
+# design SOT: Obsidian-airlens/wiki/architecture/free-global-near-real-time-aq-macos-2026-07-16.md
+# campaign plan: mac-p1-global-aq-pipeline (W2 — "publish workflow + CDN 착지 검증").
+#
+# Runs the mac AQ producers (CAMS global gases+PM, NOAA GEFS-Aerosols global PM,
+# AirKorea + EEA-UTD regional observations — AirKorea is cred-gated and skips
+# without a key, EEA is keyless), pipes each through the shared
+# QA -> provenance -> quantize step (build_mac_aq_snapshot.py), and publishes the result
+# to the public HF dataset repo (Robeedau/airlens-live, `mac-data/data/**` prefix) via
+# scripts/etl/hf_publish.py — no Supabase DB/Edge Function/R2 in this hot path (design SOT
+# §"완전 무료 배포 구조" L54). GitHub Pages retired 2026-08-26 ahead of the repo's planned
+# private-visibility flip (plan: frolicking-squishing-crane Wave S2) — Pages does not serve
+# from a private repo on the Free plan.
+#
+# SCOPE NOTE (do not confuse with the full P0 contract): the design SOT's file layout
+# (`data/mac/v1/current.json` + `manifests/{snapshotId}.json` +
+# `global/{snapshotId}/{geohash}.json.gz` + `observations/{region}/{snapshotId}/{geohash}.json.gz`)
+# requires a source-cascade + geocell-tiling + manifest builder
+# (`scripts/etl/build_mac_aq_tiles.py`) that does not exist yet — the campaign plan
+# lists it as an unimplemented W1 deliverable. This workflow instead publishes each
+# source's own QA'd/quantized envelope (`mac_aq_adapter` schema) flat, at
+# `data/mac/v1/sources/<source>.json`, plus an observability `data/mac/v1/index.json`.
+# No consumer reads this path yet — `apps/mac/AirLens/Data/AirLensSnapshotClient.swift`
+# (P1-lite) still reads the pre-existing `airlens.cloud/data/current-{pm25,pm10}-grid.json`
+# Cloudflare Pages artifact built by the unrelated `frontend-data-sync.yml` pipeline.
+# Promoting the mac client to consume this path is W3 in the campaign plan.
+#
+# Outage tolerance (design SOT §"검증 게이트" — "last-good 유지, stale=true"): before
+# overlaying fresh output, each source's previously-published file is fetched from the
+# published HF dataset repo as a baseline. A source whose collector/QA step fails this run keeps
+# its last-good baseline (self-describing staleness via its own `expiresAt`/`generatedAt`
+# envelope fields — no fabricated "stale" flag is invented here, the schema in the
+# design SOT does not define one). A source with neither fresh output nor a baseline is
+# simply omitted — never fabricated.
+#
+# Retry-storm guard: each source is attempted at most once per run (no in-workflow
+# retry loop); a failure just waits for the next hourly schedule tick. cdsapi's
+# single `retrieve()` call handles polling for that one request only.
+
+on:
+  schedule:
+    # hourly :25 — data-collect-hourly(:05 */3)와 겹치지 않는 슬롯.
+    - cron: '25 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-data-publish
+  cancel-in-progress: false
+
+jobs:
+  collect-and-build:
+    if: github.repository == 'AirLens-cloud/airlens-data'
+    # 2026-10-10 public 전환 → hosted 복귀 (public repo 의 hosted 분은 무료, self-hosted 러너는 fork 노출 위험).
+    runs-on: ubuntu-latest
+    # 20 -> 25 (2026-07-27) -> 30 (2026-07-28). The job timeout cancels the whole job
+    # regardless of any step's continue-on-error, so it has to clear the sum of every
+    # step's worst case.
+    #
+    # 2026-07-28 — the fix deferred above ("giving those two their own `timeout`
+    # backstop is the real fix ... it needs their upstream latency measured, not
+    # guessed") is now done, because the failure it predicted actually happened. Run
+    # 30353041479 (11:00Z) hung in CAMS for the full 25 minutes and was CANCELLED, and
+    # cancellation skips every later step: GEFS, AirKorea and EEA never ran. One broken
+    # source took down the publish for all four, and the healthcheck probe then reported
+    # airkorea/eea-utd `stale` + cams `absent` — three symptoms, one cause.
+    #
+    # The latency is now measured, not guessed (successful runs 30340906216 /
+    # 30330875144 / 30329711266):
+    #   CAMS      3s / 89s / 38s   -> backstop 300s  (3.4x worst success)
+    #   GEFS      5s /  5s /  7s   -> backstop 120s  (17x)
+    #   AirKorea 87s / 97s / 151s  -> backstop 300s  (2x)
+    #   EEA     362s / 601s / 601s -> backstop 840s  (unchanged, self-bounds at 600s)
+    # Worst case 1560s + setup/publish overhead (~180s) = ~1740s, so the job timeout has
+    # to exceed that or an all-slow run reintroduces the very cancellation this fixes.
+    # hosted 콜드 스타트(apt + pip + setup-python)를 감안해 오버헤드를 90s -> 180s 로 잡았다.
+    # 35 min = 2100s leaves ~360s of margin. Hourly cron with `concurrency: mac-data-publish`
+    # tolerates it, and with per-step backstops in place a hang can no longer reach it.
+    # The arithmetic is enforced by scripts/etl/test_mac_publish_timeouts.py.
+    timeout-minutes: 35
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # BASE for both the outage-tolerance baseline fetch (below) and the final
+      # publish (bottom of this job) — resolve URL for the HF dataset repo prefix
+      # that mirrors this workflow's former `site/data/**` Pages layout 1:1, so
+      # `${HF_LIVE_BASE}/data/mac/v1/...` / `.../data/web/v1/...` joins exactly
+      # like the retired `${PAGES_BASE}/data/mac/v1/...` did.
+      HF_LIVE_BASE: https://huggingface.co/datasets/Robeedau/airlens-live/resolve/main/mac-data
+    steps:
+      # `runner` context isn't allowed in job-level `env:` (actionlint-verified) — resolve
+      # once here (step-level `run:` can use it) and export via $GITHUB_ENV instead.
+      - name: Resolve temp directories
+        run: |
+          echo "RAW_DIR=${{ runner.temp }}/raw" >> "$GITHUB_ENV"
+          echo "FINAL_DIR=${{ runner.temp }}/final" >> "$GITHUB_ENV"
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.11'
+
+      # hosted 러너는 매 run 새 VM 이라 eccodes 가 없다. 그렇다고 매번 apt-get update 를
+      # 치면 미러 동기화 중 "File has unexpected size" 로 run 이 죽는다(2026-09 실측:
+      # 40 run 중 2 실패, 전부 이 스텝). 먼저 재시도(Acquire::Retries)로 설치하고,
+      # 실패할 때만 update 후 재설치한다.
+      - name: Install system deps (eccodes — grib_get_data for CAMS/GEFS decode)
+        run: |
+          command -v grib_get_data >/dev/null || sudo apt-get install -y -qq -o Acquire::Retries=3 libeccodes-tools || { sudo apt-get update -qq -o Acquire::Retries=3 && sudo apt-get install -y -qq -o Acquire::Retries=3 libeccodes-tools; }
+
+      - name: Install Python deps (versions pinned to match models/uv.lock's ubuntu-x86_64/py3.11 resolution)
+        run: pip install cdsapi==0.7.7 pandas==3.0.2 pyarrow==23.0.1
+
+      - name: Install huggingface_hub
+        run: pip install "huggingface_hub>=0.34,<2"
+
+      - name: Detect optional credentials (graceful skip — never fail the run for a missing key)
+        id: creds
+        env:
+          CDS_API_KEY: ${{ secrets.CDS_API_KEY }}
+          AIRKOREA_API_KEY: ${{ secrets.AIRKOREA_API_KEY }}
+        run: |
+          if [ -z "${CDS_API_KEY:-}" ]; then
+            echo "::warning::CDS_API_KEY not set — CAMS global collection skipped this run"
+            echo "cams=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "cams=true" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -z "${AIRKOREA_API_KEY:-}" ]; then
+            echo "::warning::AIRKOREA_API_KEY not set in the GitHub Actions secrets namespace (it currently only exists in the Supabase Edge namespace, a separate store) — AirKorea collection skipped this run. Register with: gh secret set AIRKOREA_API_KEY"
+            echo "airkorea=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "airkorea=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Collect CAMS global (gases + PM)
+        id: cams
+        if: steps.creds.outputs.cams == 'true'
+        continue-on-error: true
+        env:
+          CDS_API_URL: https://ads.atmosphere.copernicus.eu/api
+          CDS_API_KEY: ${{ secrets.CDS_API_KEY }}
+          MAC_CAMS_OUTPUT_PATH: ${{ runner.temp }}/raw/cams.json
+        # Backstop — same shape and same reason as the EEA one below: shell `timeout`
+        # (exit 124 = step FAILURE, covered by continue-on-error) and NOT step-level
+        # `timeout-minutes`, which marks the step CANCELLED and takes the whole job with
+        # it. cdsapi's retrieve() polls an upstream queue with no client-side deadline;
+        # run 30353041479 sat in it until the job died.
+        run: |
+          mkdir -p "$RAW_DIR"
+          timeout 300 python3 scripts/etl/collect_cams_global.py
+
+      - name: Collect NOAA GEFS-Aerosols global PM
+        id: gefs_chem
+        continue-on-error: true
+        env:
+          MAC_GEFS_CHEM_OUTPUT_PATH: ${{ runner.temp }}/raw/gefs-chem.json
+        # Backstop — see the CAMS step. The NOMADS fetch has been fast in every measured
+        # run (5-7s), but "fast so far" is not a bound: a stall here would starve every
+        # source downstream exactly as CAMS did.
+        run: |
+          mkdir -p "$RAW_DIR"
+          timeout 120 python3 scripts/etl/collect_gefs_chem_global.py
+
+      - name: Collect AirKorea regional observations
+        id: airkorea
+        if: steps.creds.outputs.airkorea == 'true'
+        continue-on-error: true
+        env:
+          AIRKOREA_API_KEY: ${{ secrets.AIRKOREA_API_KEY }}
+          MAC_AIRKOREA_OUTPUT_PATH: ${{ runner.temp }}/raw/airkorea.json
+        # Backstop — see the CAMS step. This collector walks the sido list sequentially,
+        # so a slow upstream stretches its wall time rather than failing outright
+        # (87-151s measured); 300s bounds the tail without cutting a healthy run.
+        run: |
+          mkdir -p "$RAW_DIR"
+          timeout 300 python3 scripts/etl/collect_mac_airkorea.py
+
+      - name: Collect EEA Up-To-Date regional observations
+        id: eea_utd
+        continue-on-error: true
+        env:
+          MAC_EEA_OUTPUT_PATH: ${{ runner.temp }}/raw/eea-utd.json
+          # 국가별 커버리지 사이드카 → 발행 index 의 sources["eea-utd"].coverage.
+          # "예산이 끊겨 못 돈 국가" 와 "다운로드가 죽은 국가" 는 대응이 다른데,
+          # WARN 로그는 run 이 지나가면 사라져 어느 쪽이 반복되는지 볼 수 없었다.
+          MAC_EEA_COVERAGE_PATH: ${{ runner.temp }}/coverage/eea-utd.json
+          # Budget < shell timeout with real margin: a metadata call that straddles the
+          # deadline can run up to 120s past it (API wall), and after the deadline the
+          # in-flight downloads get a drain grace (45s) — run 29989225749 hit exit 124
+          # at 540s with the default 480s budget (0 output written). Worst realistic
+          # overshoot is ~165s; the backstop below is budget + 240s, deliberately more
+          # than that so the collector always reaches its partial-data write.
+          #
+          # 2026-07-27: 360 -> 600. At 360s run 30251961401 spent the budget exactly
+          # (362s) and got through ~2.5 of 6 countries; ES/PL/NL never started. The
+          # collector now rotates the country order by UTC hour, so a short budget no
+          # longer starves the tail — but a bigger budget still means more countries
+          # collected fresh per run and fewer carried over from the previous publish.
+          #
+          # 2026-07-30: 600 유지 확정 (사용자 결정). 상향 여부를 발행물로 실측했고,
+          # 상향의 근거로 삼았던 "커버리지 손실"은 일어나지 않는 것으로 나왔다 —
+          # 발행분(2,887,466 B / 1,845 관측소)에 6개국이 전부 있고 모든 관측 나이가
+          # 만료(observedAt+4h) 안이다:
+          #
+          #   country  stations  carriedOver  ageHours(min/median/max)
+          #   DE          135        135      0.66/0.66/1.66
+          #   ES          494          0      0.65/1.65/6.65
+          #   FR          460        460      2.66/2.66/3.66
+          #   IT          489          0      0.65/1.65/7.65
+          #   NL           78         57      0.65/0.66/0.66
+          #   PL          189          2      0.65/0.65/3.65
+          #
+          # 회전 + carry-over 조합이 커버리지를 이미 덮는다. 예산이 실제로 사는 값은
+          # *신선도*뿐 — 654/1,845(35%)가 이번 run 수집이 아니라 이월값이고, ES 는
+          # 방문한 run 에서도 2,456 파일 중 261 개를 예산에 잃는다. 이월값은
+          # `qaFlags.carriedOver=true` + 재계산된 ageHours 로 정직하게 표시되므로
+          # 숨은 손실이 아니다. 시간별 publish × 24회/일의 Actions 분을 더 쓰는 대신
+          # 그 표시를 신뢰하는 쪽을 택했다. B-7 종결.
+          #
+          # 다시 열 트리거: coverage 사이드카에서 어떤 국가가 연속 6시간(회전 1주기)
+          # 이상 `skipped_budget` 이거나, 발행분에서 한 국가가 통째로 사라질 때.
+          MAC_EEA_BUDGET_SECONDS: '600'
+          # Progress prints (stdout) are block-buffered by default — runs 3/4 showed
+          # zero output for 10 minutes, making the stall undiagnosable from CI logs.
+          PYTHONUNBUFFERED: '1'
+        # Backstop only — the collector self-bounds via MAC_EEA_BUDGET_SECONDS. Shell
+        # `timeout` (exit 124 = step FAILURE) instead of step-level timeout-minutes: a
+        # timed-out step is marked CANCELLED, and continue-on-error does NOT cover
+        # cancellation — run 29988635214 proved a cancelled EEA step still fails the
+        # whole job and skips QA/assemble/deploy for every source.
+        run: |
+          mkdir -p "$RAW_DIR" "$(dirname "$MAC_EEA_COVERAGE_PATH")"
+          timeout 840 python3 scripts/etl/collect_mac_eea_utd.py
+
+      - name: Log collector outcomes (fail-loud — each source is independent, one failing must not hide the others)
+        if: always()
+        env:
+          # Outcomes are written to a file, not just logged, so the published
+          # index.json can carry *why* a source is missing. A `::warning::` line
+          # buried in a green run's log is not observability — CAMS died behind
+          # `continue-on-error: true` for days while the workflow stayed green,
+          # and the remaining-work inventory read that as "key not set".
+          OUTCOMES_PATH: ${{ runner.temp }}/collector-outcomes.json
+          # GitHub Actions sets outcome="skipped" (never empty) when a step's `if:`
+          # is false — no `||` fallback needed for the guarded cams/airkorea steps.
+          CAMS_OUTCOME: ${{ steps.cams.outcome }}
+          GEFS_CHEM_OUTCOME: ${{ steps.gefs_chem.outcome }}
+          AIRKOREA_OUTCOME: ${{ steps.airkorea.outcome }}
+          EEA_UTD_OUTCOME: ${{ steps.eea_utd.outcome }}
+        run: |
+          declare -A OUTCOMES=(
+            [cams]="$CAMS_OUTCOME"
+            [gefs-chem]="$GEFS_CHEM_OUTCOME"
+            [airkorea]="$AIRKOREA_OUTCOME"
+            [eea-utd]="$EEA_UTD_OUTCOME"
+          )
+          for name in "${!OUTCOMES[@]}"; do
+            outcome="${OUTCOMES[$name]}"
+            if [ "$outcome" = "failure" ]; then
+              echo "::warning::${name} collector failed this run — will fall back to last-good baseline if one exists"
+            else
+              echo "  ${name}: ${outcome}"
+            fi
+          done
+          python3 - <<'PYEOF' > "$OUTCOMES_PATH"
+          import json, os
+          print(json.dumps({
+              "cams": os.environ["CAMS_OUTCOME"],
+              "gefs-chem": os.environ["GEFS_CHEM_OUTCOME"],
+              "airkorea": os.environ["AIRKOREA_OUTCOME"],
+              "eea-utd": os.environ["EEA_UTD_OUTCOME"],
+          }))
+          PYEOF
+
+      - name: QA + provenance + quantize (build_mac_aq_snapshot.py, one source file at a time)
+        run: |
+          mkdir -p "$FINAL_DIR"
+          declare -A RAW=(
+            [cams]="$RAW_DIR/cams.json"
+            [gefs-chem]="$RAW_DIR/gefs-chem.json"
+            [airkorea]="$RAW_DIR/airkorea.json"
+            [eea-utd]="$RAW_DIR/eea-utd.json"
+          )
+          for name in "${!RAW[@]}"; do
+            in="${RAW[$name]}"
+            if [ -f "$in" ]; then
+              if MAC_QA_INPUT_PATH="$in" MAC_QA_OUTPUT_PATH="$FINAL_DIR/${name}.json" \
+                  python3 scripts/etl/build_mac_aq_snapshot.py; then
+                echo "  ${name}: QA/provenance/quantize OK"
+              else
+                echo "::warning::${name}: QA/provenance/quantize pipeline failed — falling back to last-good baseline if one exists"
+              fi
+            else
+              echo "  ${name}: no raw collector output this run"
+            fi
+          done
+
+      - name: Fetch last-good baseline (outage tolerance — never let one bad run erase a source)
+        run: |
+          mkdir -p site/data/mac/v1/sources
+          for name in cams gefs-chem airkorea eea-utd; do
+            if curl -fsSL "${HF_LIVE_BASE}/data/mac/v1/sources/${name}.json" \
+                -o "site/data/mac/v1/sources/${name}.json" 2>/dev/null; then
+              echo "  ${name}: baseline fetched from HF"
+            else
+              echo "  ${name}: no previously published snapshot (first run, or prior outage with no earlier publish)"
+              rm -f "site/data/mac/v1/sources/${name}.json"
+            fi
+          done
+
+      # EEA only. Its collector rotates which countries it visits each hour (a fixed
+      # order starved the tail countries permanently), so a run's output legitimately
+      # covers a subset of countries — and the file-granularity last-good fallback
+      # below cannot see that, because the file itself IS fresh. Without this step a
+      # country would blink in and out of the published snapshot hour to hour. The
+      # merge re-adds only stations the previous publish already carried, only while
+      # they are still unexpired, and re-stamps their age against now — no value is
+      # invented and nothing expired is resurrected (see the script's docstring).
+      - name: Carry over unexpired stations the rotation did not visit this run (EEA)
+        # Non-fatal by construction: the script writes in place, so a failure here just
+        # leaves this run's fresh-only output to be published — the pre-merge behaviour.
+        # It must never take the publish down with it; the baseline it reads is a past
+        # artifact fetched off the HF dataset repo, and one bad record in it would
+        # otherwise cost every source its hourly publish.
+        continue-on-error: true
+        run: |
+          MAC_MERGE_FRESH_PATH="$FINAL_DIR/eea-utd.json" \
+          MAC_MERGE_BASELINE_PATH="site/data/mac/v1/sources/eea-utd.json" \
+            python3 scripts/etl/merge_point_readings.py
+
+      - name: Assemble site (overlay fresh output over last-good baseline, then write observability index)
+        env:
+          OUTCOMES_PATH: ${{ runner.temp }}/collector-outcomes.json
+          SERVED_FROM_PATH: ${{ runner.temp }}/served-from.json
+          # 수집기가 남긴 <source>.json 커버리지 사이드카 디렉터리 (지금은 EEA 만 씀).
+          COVERAGE_DIR: ${{ runner.temp }}/coverage
+        run: |
+          # `available: true` alone cannot distinguish "collected fresh this run"
+          # from "the collector has been dead for a week and we are still serving
+          # the last good file". Record which one it was.
+          SERVED='{}'
+          for name in cams gefs-chem airkorea eea-utd; do
+            fresh="$FINAL_DIR/${name}.json"
+            dest="site/data/mac/v1/sources/${name}.json"
+            if [ -f "$fresh" ]; then
+              cp "$fresh" "$dest"
+              echo "  ${name}: publishing fresh snapshot"
+              SERVED=$(SERVED="$SERVED" NAME="$name" VALUE=fresh python3 -c 'import json,os;d=json.loads(os.environ["SERVED"]);d[os.environ["NAME"]]=os.environ["VALUE"];print(json.dumps(d))')
+            elif [ -f "$dest" ]; then
+              echo "  ${name}: keeping last-good baseline (this run produced nothing)"
+              SERVED=$(SERVED="$SERVED" NAME="$name" VALUE=baseline python3 -c 'import json,os;d=json.loads(os.environ["SERVED"]);d[os.environ["NAME"]]=os.environ["VALUE"];print(json.dumps(d))')
+            else
+              echo "::warning::${name}: no fresh data and no baseline — omitted from this publish"
+            fi
+          done
+          printf '%s' "$SERVED" > "$SERVED_FROM_PATH"
+
+          # index 조립은 scripts/etl/build_mac_index.py 로 뺐다 — 워크플로 안의
+          # 인라인 Python 은 테스트가 불가능해서 영원히 회귀 미보호 상태다.
+          MAC_INDEX_OUTCOMES="$OUTCOMES_PATH" \
+          MAC_INDEX_SERVED_FROM="$SERVED_FROM_PATH" \
+          MAC_INDEX_COVERAGE_DIR="$COVERAGE_DIR" \
+            python3 scripts/etl/build_mac_index.py "$PWD/site/data/mac/v1"
+
+      # R-W1: each run's `./site` checkout starts empty — GitHub Actions runners carry
+      # nothing forward between runs. Without this step, a conversion failure below
+      # (continue-on-error, non-fatal by design) would make data/web/v1/*.json 404
+      # entirely on this publish instead of just keeping the previous values, exactly the
+      # outage-tolerance bug the mac/v1/sources baseline-fetch step above already solves for
+      # the mac envelopes. Same pattern, same style, same non-fatal semantics (a curl miss
+      # just means "no previous publish yet" — not a run failure).
+      - name: Fetch last-good web/v1 baseline (outage tolerance — same pattern as mac/v1/sources above)
+        run: |
+          mkdir -p site/data/web/v1
+          for name in current-pm25-grid.json current-pm10-grid.json health.json; do
+            if curl -fsSL "${HF_LIVE_BASE}/data/web/v1/${name}" \
+                -o "site/data/web/v1/${name}" 2>/dev/null; then
+              echo "  ${name}: baseline fetched from HF"
+            else
+              echo "  ${name}: no previously published snapshot (first run, or prior outage with no earlier publish)"
+              rm -f "site/data/web/v1/${name}"
+            fi
+          done
+
+      # R-W1: convert the mac GEFS-chem envelope (mac_aq_adapter schema, north-first grid)
+      # into the web Globe's AQGridResponse contract (sparse points, south-first latMin) so
+      # that this already-live-but-unconsumed publish path can back the frontend's PM2.5/PM10
+      # scalar field while Supabase Storage/Edge stay on 402 quota. Reads the just-assembled
+      # site/data/mac/v1/sources/gefs-chem.json (fresh-or-baseline — already outage-tolerant
+      # from the assemble step above) and the index.json this step just wrote, so this step
+      # inherits the same last-good behavior without duplicating it. Non-fatal by construction
+      # (continue-on-error): a conversion failure must not take down the mac publish itself —
+      # scripts/etl/build_web_aq_grid.py never partially writes (temp file + os.replace), so a
+      # failure here just leaves the site/data/web/v1/*.json baseline fetched by the step above
+      # (fresh-or-previous, never absent-and-404) to be deployed instead of corrupt output.
+      - name: Convert mac GEFS-chem snapshot to web AQGridResponse contract (R-W1)
+        id: web_v1_convert
+        continue-on-error: true
+        run: |
+          if [ -f "site/data/mac/v1/sources/gefs-chem.json" ]; then
+            python3 scripts/etl/build_web_aq_grid.py \
+              --input "site/data/mac/v1/sources/gefs-chem.json" \
+              --index "site/data/mac/v1/index.json" \
+              --out-dir "site/data/web/v1"
+          else
+            echo "  gefs-chem: no fresh-or-baseline snapshot published this run — skipping web grid conversion"
+          fi
+
+      # Mirrors `site/data/**` into the HF dataset repo under `mac-data/data/**`, 1:1
+      # with the local tree, so a consumer's `${BASE}/data/mac/v1/...` (or
+      # `.../data/web/v1/...`) join keeps working with only BASE swapped to
+      # `https://huggingface.co/datasets/Robeedau/airlens-live/resolve/main/mac-data`
+      # (GitHub Pages retired — see header comment).
+      - name: Publish to HF (mac-data/data/mac/v1 + mac-data/data/web/v1)
+        # hf_publish.py's `upload` refuses an empty source directory (guard_no_empty_replace
+        # spirit) — guard here too so a from-scratch first run with no baseline and no fresh
+        # web/v1 conversion output doesn't fail the whole job.
+        run: |
+          if [ -n "$(find site/data/mac/v1 -type f -print -quit)" ]; then
+            python3 scripts/etl/hf_publish.py upload \
+              --src site/data/mac/v1 --dest mac-data/data/mac/v1 \
+              --message "mac/v1 snapshot publish"
+          else
+            echo "  site/data/mac/v1: empty this run — nothing to publish"
+          fi
+          if [ -n "$(find site/data/web/v1 -type f -print -quit)" ]; then
+            # 계약 게이트 (2026-09-04). 이 경로는 검증 없이 발행돼 왔다 — 같은 파일명을
+            # 내는 aq-data 쪽만 `current-aq-grid.v1` 로 막혀 있었다. 두 산출물은 모양이
+            # 달라(이쪽은 다운샘플 희소 격자, schemaVersion/distribution 없음) 남의 계약을
+            # 씌우면 정상 발행이 죽으므로 `web-aq-grid.v1` 을 따로 뒀다.
+            # `--schema-targets`: 이 디렉터리는 격자 2개 + health.json 을 함께 담는다.
+            # health.json 은 다른 제품이라 대상에서 빼고, 건너뛴 사실은 로그에 남는다.
+            python3 scripts/etl/hf_publish.py upload \
+              --src site/data/web/v1 --dest mac-data/data/web/v1 \
+              --schema web-aq-grid.v1 \
+              --schema-targets 'current-*-grid.json' \
+              --message "web/v1 AQGridResponse publish"
+          else
+            echo "  site/data/web/v1: empty this run — nothing to publish"
+          fi
+
+      # 발행 *후* 를 되읽는다. 위 업로드는 성공 여부만 알 뿐, 이 경로가 며칠째
+      # 같은 파일을 서빙하고 있는지는 모른다 — #21 이 계약(모양)을 걸었지만
+      # **신선도는 아무도 재지 않았다**. aq-data 쪽 프로브와 같은 스크립트를 쓰되
+      # `--product web-v1` 로 이 경로만 본다.
+      #
+      # SLA 12h 의 근거는 명목 cron 이 아니라 실측이다: `25 * * * *` 는 매시지만
+      # 최근 성공 run 12건의 실제 간격이 2.4~5.7h 였다(+ 원본 스냅샷 지연 ~0.9h).
+      # 6h 로 잡으면 정상 운영에서 울려 프로브가 양치기 소년이 된다.
+      - name: Verify web/v1 freshness (live probe)
+        if: always()
+        env:
+          MAX_WEB_V1_STALENESS_HOURS: "12"
+        run: python3 scripts/etl/check_aq_grid_freshness.py --product web-v1

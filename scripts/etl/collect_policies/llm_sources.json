@@ -1,0 +1,17 @@
+{
+  "_comment": "LLM extraction targets — free-text policy pages with no machine-readable feed (e.g. China MEE, India CPCB). Gated behind RUN_LLM_EXTRACT=1 + OPENAI_API_KEY (GitHub Actions secret). Each entry: {url, country (ISO-2), kind: 'pdf'|'html', note}. Deterministic countryCode/region come from the entry, not the LLM. All URLs verified reachable via the collector's urllib fetch path.",
+  "sources": [
+    {
+      "url": "https://policy.asiapacificenergy.org/node/2875",
+      "country": "CN",
+      "kind": "html",
+      "note": "China Air Pollution Prevention and Control Action Plan (APPCAP, 2013) — UN ESCAP Asia Pacific Energy Portal"
+    },
+    {
+      "url": "https://prana.cpcb.gov.in/ncapDashboard/download_public_portal_file/NCAP_Report.pdf",
+      "country": "IN",
+      "kind": "pdf",
+      "note": "India National Clean Air Programme (NCAP, 2019) — official CPCB/PRANA report (PDF), exercises the pdf_extract path"
+    }
+  ]
+}

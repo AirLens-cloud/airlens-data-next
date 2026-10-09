@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AirLens-cloud/airlens-data/contracts/web-aq-grid.v1.schema.json",
+  "title": "Web AQ Grid v1 (AQGridResponse)",
+  "description": "scripts/etl/build_web_aq_grid.py 가 mac GEFS-chem 스냅샷을 변환해 mac-data/data/web/v1/current-{pm25,pm10}-grid.json 으로 발행하는 격자. **current-aq-grid.v1 과 파일명이 같지만 다른 계약이다** — 그쪽은 collect_noaa_aq.py 의 조밀 격자(schemaVersion/generatedAt/distribution/EPA 공시를 싣는다)이고, 이쪽은 mac 스냅샷에서 다운샘플한 희소 격자로 그 필드들이 아예 없다. 남의 계약을 씌우면 정상 발행이 죽으므로 계약을 따로 둔다. 소비자는 airlens-web `src/api/airQualityGrid.ts` 의 `AQGridResponse` 이며, 이 파일은 그 fetch 체인의 CDN 폴백 단계다.",
+  "type": "object",
+  "required": [
+    "variable",
+    "resolution",
+    "timestamp",
+    "nLat",
+    "nLon",
+    "latMin",
+    "lonMin",
+    "dLat",
+    "dLon",
+    "source",
+    "nNegativeCellsDropped",
+    "physicalMaxUgm3",
+    "nAbovePhysicalMaxDropped",
+    "points"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "variable": {
+      "description": "빌더의 POLLUTANT_VAR_KEYS 가 내보내는 두 변수. 새 오염물질을 열 때 여기도 함께 열어야 한다.",
+      "enum": ["pm2_5", "pm10"]
+    },
+    "resolution": { "type": "number", "minimum": 0 },
+    "timestamp": {
+      "description": "**원본 수집 시각**(epoch ms) — 변환 시각이 아니다. build_web_aq_grid.py 는 입력의 generatedAt 을 그대로 epoch ms 로 옮기고, 없으면 지어내지 않고 죽는다. current-aq-grid.v1 의 timestamp(=GEFS 사이클 시각)와 **의미가 다르다** — 같은 이름이라고 같은 양으로 읽으면 안 된다.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "nLat": { "type": "integer", "minimum": 1 },
+    "nLon": { "type": "integer", "minimum": 1 },
+    "latMin": {
+      "description": "**남단** 위도. 입력 mac 격자는 행0=북단(la1) 관례라 la1 을 그대로 쓰면 지구본이 상하 반전된다 — south_anchored_lat_min() 이 그 뒤집기를 명시적으로 계산한다.",
+      "type": "number",
+      "minimum": -90,
+      "maximum": 90
+    },
+    "lonMin": { "type": "number", "minimum": -180, "maximum": 180 },
+    "dLat": { "type": "number", "minimum": 0 },
+    "dLon": { "type": "number", "minimum": 0 },
+    "source": { "type": "string" },
+    "nNegativeCellsDropped": {
+      "description": "물리적으로 불가능한 음수 질량농도라 제외한 셀 수. required 이고 기본값을 두지 않는다 — 기본 0 을 허용하면 '필터가 안 돌았다' 가 '0건 발견' 으로 둔갑한다. current-aq-grid.v1 의 nNegativeCellsNulled 와 짝이지만 동사가 다르다: 그쪽은 조밀 격자라 셀을 남기고 값만 null 로 만들고, 이쪽은 희소 출력이라 셀 자체를 뺀다(누락 = 결측이 이 포맷의 인코딩).",
+      "type": "integer",
+      "minimum": 0
+    },
+    "physicalMaxUgm3": {
+      "description": "빌더가 이 변수에 적용한 물리 상한 (µg/m³) — pm2_5=1,000 (발표된 QC 관행) / pm10=10,000 (기록 극값 봉투 위 내부 결정). null = 이 변수의 상한이 아직 정의되지 않아 안 걸렀다는 명시적 공시 — 필드 부재와 달리 '안 걸렀음' 이 구분된다. 근거 정본 = collect_noaa_aq.PHYSICAL_MAX_UGM3 주석 (2026-09-05 사용자 확정).",
+      "type": ["number", "null"],
+      "minimum": 1
+    },
+    "nAbovePhysicalMaxDropped": {
+      "description": "물리 상한 초과라 제외한 셀 수. nNegativeCellsDropped 와 같은 처분(희소 출력이라 셀 자체를 뺌 — current-aq-grid.v1 의 nAbovePhysicalMaxNulled 와 동사가 다른 이유도 동일). required 이고 기본값 없음.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "points": {
+      "description": "희소 리스트 — 값을 못 얻은 셀은 아예 없다. 따라서 len(points) 는 nLat*nLon 보다 작을 수 있고, 그것이 정상이다. 셀 수를 **초과**하는 것만 격자 정의와의 불일치다.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["lat", "lon", "value"],
+        "additionalProperties": false,
+        "properties": {
+          "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+          "lon": { "type": "number", "minimum": -180, "maximum": 180 },
+          "value": {
+            "description": "current-aq-grid.v1 과 달리 null 을 허용하지 않는다 — 이 포맷의 결측은 null 이 아니라 **엔트리 부재**이기 때문이다. maximum 10,000 은 두 변수의 느슨한 쪽 백스톱 — 변수별 정밀 상한(pm2_5 1,000)은 build_points() 가 걸고 nAbovePhysicalMaxDropped 로 공시한다. 하한 0 은 build_points() 가 음수를 이미 제외하므로 발행 직전 재확인이다.",
+            "type": "number",
+            "minimum": 0,
+            "maximum": 10000
+          }
+        }
+      }
+    }
+  }
+}

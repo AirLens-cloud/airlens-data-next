@@ -1,0 +1,15 @@
+# airlens-data 수집·ETL 의존성 (감사 P0-2: fresh env 재현성 — pandas 누락으로 1 test 실패하던 갭)
+# 버전 핀은 워크플로 인라인 pip install 과 동기 유지 (mac-data-publish.yml L110, models/uv.lock
+# ubuntu-x86_64/py3.11 해석과 일치). 워크플로 핀을 올리면 이 파일도 같이 갱신할 것.
+cdsapi==0.7.7
+pandas==3.0.2
+pyarrow==23.0.1
+huggingface_hub>=0.34,<2
+
+# dev/test
+pytest>=8
+jsonschema>=4.25,<5  # contracts/*.schema.json conformance (publish_contracts.py, scripts/test_publish_contracts.py)
+# 워크플로 YAML 게이트(scripts/test_workflow_yaml_valid.py)가 쓴다. huggingface_hub
+# 가 전이로 끌어오기도 하지만 우연에 기대지 않는다 — 그쪽 의존이 빠지면 게이트가
+# collection error 로 조용히 사라진다.
+PyYAML>=6,<7

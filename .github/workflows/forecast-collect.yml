@@ -1,0 +1,312 @@
+name: Forecast Collection (Open-Meteo CAMS PM2.5)
+
+# Server-Collect, Client-Display: a cron fetches the Open-Meteo CAMS air-quality
+# forecast (PM2.5, hourly, free/keyless) → HF live-data repo `aq-data/forecast.json`
+# (public dataset, Robeedau/airlens-live — 402 migration, plan:
+# supabase-polymorphic-abelson; formerly Supabase Storage). The browser reads
+# from that resolve URL (windFetch-style cascade), never Open-Meteo directly.
+# main is branch-protected → cron writes to HF, not a commit.
+#
+# Honest/Glass-box: CAMS is deterministic — the payload carries NO p10/p90 band.
+# The web renders a point forecast + "Open-Meteo CAMS" caveat, never a fabricated
+# uncertainty interval.
+
+on:
+  schedule:
+    - cron: '15 */6 * * *'  # every 6h at :15 (forecast refresh; freshness window = 24h)
+  workflow_dispatch:
+
+concurrency:
+  group: forecast-collect
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect-forecast:
+    if: github.repository == 'AirLens-cloud/airlens-data'
+    # 2026-10-10 public 전환 → hosted 복귀 (public repo 의 hosted 분은 무료, self-hosted 러너는 fork 노출 위험).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+    steps:
+      # Checkout supplies the committed static forecast JSON for the city list.
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install huggingface_hub
+        run: pip install "huggingface_hub>=0.34,<2"
+
+      - name: Collect Open-Meteo CAMS forecast
+        run: |
+          cat > collect_forecast.py << 'SCRIPT'
+          """
+          Open-Meteo CAMS PM2.5 forecast collector (Server-Collect).
+          For each city in the existing forecast set (+ Seoul guaranteed), fetch the
+          hourly PM2.5 forecast and emit a deterministic payload (no p10/p90 band).
+          """
+          import json, os, sys, time, urllib.error, urllib.request
+          from datetime import datetime, timezone
+
+          # 2026-07-27 정직성 rename: 구 tft_forecast.json → cams_forecast.json.
+          # payload 는 처음부터 Open-Meteo CAMS 수집물이었고 TFT 출력이 아니다.
+          # 구 파일은 30일 dual-keep 후 제거 (2026-08-27 이후).
+          STATIC_PATH = "seed/cams_forecast.json"  # repo-split(2026-08-26): 구 apps/web/public/data/predictions/ 시드 사본
+          # 402 migration(plan: supabase-polymorphic-abelson) — continuity read 는
+          # HF 공개 dataset repo 의 직전 발행본을 읽는다(구 Supabase Storage 대체).
+          HF_LIVE_BASE = "https://huggingface.co/datasets/Robeedau/airlens-live/resolve/main"
+          STORAGE_URL = f"{HF_LIVE_BASE}/aq-data/forecast.json"
+          FORECAST_DAYS = 2  # 48h — covers the 24h display window + buffer
+          DELAY = 0.3
+
+          # ── 1. City list: union of the static seed (authoritative baseline,
+          #    incl. newly added cities) + live HF repo (continuity). dedupe by
+          #    name so static additions always merge in even when a prior run exists. ──
+          def load_cities():
+              by_name = {}
+              for loader in (_from_static, _from_storage):  # static first = coords source of truth
+                  try:
+                      for c in loader():
+                          key = c["name"].lower()
+                          if key not in by_name:
+                              by_name[key] = c
+                  except Exception as e:
+                      print(f"  city-list {loader.__name__}: {e}", file=sys.stderr)
+              return list(by_name.values())
+
+          def _from_storage():
+              raw = urllib.request.urlopen(STORAGE_URL, timeout=15).read()
+              return _extract(json.loads(raw))
+
+          def _from_static():
+              with open(STATIC_PATH) as f:
+                  return _extract(json.load(f))
+
+          def _extract(doc):
+              out = []
+              for c in doc.get("cities", []):
+                  if c.get("name") and c.get("lat") is not None and c.get("lon") is not None:
+                      out.append({
+                          "name": c["name"],
+                          "lat": float(c["lat"]),
+                          "lon": float(c["lon"]),
+                          "country_code": c.get("country_code", ""),
+                      })
+              return out
+
+          cities = load_cities()
+
+          # Guarantee Seoul (Today default fallback city), not in the legacy set.
+          if not any(c["name"].lower() == "seoul" for c in cities):
+              cities.append({"name": "Seoul", "lat": 37.5665, "lon": 126.9780, "country_code": "KR"})
+
+          if not cities:
+              print("No cities resolved — refusing to overwrite forecast.json", file=sys.stderr)
+              sys.exit(0)  # fail-soft: keep the existing Storage file
+
+          print(f"=== Open-Meteo CAMS forecast: {len(cities)} cities ===")
+
+          # ── 2. Fetch per-city PM2.5 forecast (fail-soft: skip on error) ──
+          # 스로틀 정책 (2026-09-05, openmeteo_chunks 와 동일 근거): 429/503 에
+          # 재시도하면 완화가 아니라 가중이고, 백오프 sleep 이 75개 도시 × 3회로
+          # 불어나 15분 잡 타임아웃(=cancelled)을 만든다 — 09-04 스케줄 3연속
+          # cancelled 의 실제 사인이다. 429 는 즉시 그 도시를 접고, 연속 3도시면
+          # 호스트 쿼터 소진으로 보고 나머지를 포기한다(직전 발행분 유지).
+          THROTTLE_CODES = (429, 503)
+          consecutive_throttles = 0
+          out_cities = []
+          for city in cities:
+              if consecutive_throttles >= 3:
+                  print(
+                      f"  연속 {consecutive_throttles}도시 스로틀 — 남은 도시를 포기한다"
+                      " (호스트 쿼터 소진 신호; 직전 발행분 유지, 타임아웃 방지)",
+                      file=sys.stderr,
+                  )
+                  break
+              url = (
+                  "https://air-quality-api.open-meteo.com/v1/air-quality"
+                  f"?latitude={city['lat']}&longitude={city['lon']}"
+                  f"&hourly=pm2_5&forecast_days={FORECAST_DAYS}&timezone=UTC"
+              )
+              hourly = []
+              for attempt in range(3):
+                  try:
+                      data = json.loads(urllib.request.urlopen(url, timeout=15).read())
+                      times = data.get("hourly", {}).get("time", [])
+                      vals = data.get("hourly", {}).get("pm2_5", [])
+                      for t_str, v in zip(times, vals):
+                          if v is None:
+                              continue
+                          # timezone=UTC returns "YYYY-MM-DDTHH:MM" (no offset) → append
+                          # ":00Z" so the browser's new Date() parses it as UTC, not local.
+                          iso = t_str if t_str.endswith("Z") else f"{t_str}:00Z"
+                          hourly.append({"time": iso, "pm25": round(float(v), 1)})
+                      consecutive_throttles = 0
+                      break
+                  except urllib.error.HTTPError as e:
+                      if e.code in THROTTLE_CODES:
+                          consecutive_throttles += 1
+                          body = ""
+                          try:
+                              body = e.read().decode("utf-8", "replace")[:160].strip()
+                          except Exception:
+                              pass
+                          print(
+                              f"  {city['name']}: HTTP {e.code} — 스로틀, 재시도하지 않는다(가중)"
+                              + (f" · body: {body}" if body else ""),
+                              file=sys.stderr,
+                          )
+                          break
+                      print(f"  {city['name']} attempt {attempt}: {e}", file=sys.stderr)
+                      time.sleep(2 * (attempt + 1))
+                  except Exception as e:
+                      print(f"  {city['name']} attempt {attempt}: {e}", file=sys.stderr)
+                      time.sleep(2 * (attempt + 1))
+              if hourly:
+                  out_cities.append({
+                      "name": city["name"],
+                      "lat": city["lat"],
+                      "lon": city["lon"],
+                      "country_code": city["country_code"],
+                      "source": "open-meteo",
+                      "hourly": hourly,
+                  })
+                  print(f"  {city['name']}: {len(hourly)} hours")
+              time.sleep(DELAY)
+
+          if not out_cities:
+              print("All city fetches failed — refusing to overwrite forecast.json", file=sys.stderr)
+              sys.exit(0)  # fail-soft
+
+          # ── 3. Emit deterministic payload (NO p10/p90 — Glass-box honest) ──
+          payload = {
+              "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "model_version": "open-meteo-cams-v1",
+              "source": "open-meteo",
+              "cities": out_cities,
+          }
+          with open("forecast.json", "w") as f:
+              json.dump(payload, f)
+          print(f"forecast.json: {len(out_cities)} cities written")
+          SCRIPT
+          python3 collect_forecast.py
+
+      - name: Upload forecast to HF
+        run: |
+          if [ -f forecast.json ]; then
+            python3 scripts/etl/hf_publish.py upload --src forecast.json --dest aq-data/forecast.json \
+              || { echo "::error::HF upload failed — forecast.json 옛 버전이 그대로 발행된다"; exit 1; }
+          else
+            echo "forecast.json absent — fetch failed, nothing uploaded (existing HF file kept)"
+          fi
+
+      # Issue-time archive for the 3-way forecast comparison (models/eval/tft §7.2
+      # issuance alignment): forecast.json above is overwrite-only, so without a
+      # dated copy no CAMS evaluation window can ever accumulate. ~4 files/day,
+      # a few hundred KB each. Idempotent per issue hour (upload upsert).
+      #
+      # Retention: 파일명이 forecast_<STAMP>.json (STAMP=%Y%m%dT%H, 예: 20260903T14)
+      # 이라 hf_publish.py 의 일반화된 TS_NAME_RE([-_](\d{10})\.json(\.gz)?$, W5
+      # 정규식 동기화) 와도 매칭되지 않는다 — STAMP 중간의 "T" 구분자가 .json
+      # 직전 10자리 연속 숫자를 끊어놓기 때문. 이 prefix 는 여전히 자동 정리
+      # 대상이 아니다(정규식 일반화로도 해소 안 됨). retention 은 후속 작업.
+      - name: Archive dated copy (forecast-archive)
+        run: |
+          if [ -f forecast.json ]; then
+            STAMP=$(date -u +%Y%m%dT%H)
+            python3 scripts/etl/hf_publish.py upload \
+              --src forecast.json --dest "aq-data/forecast-archive/forecast_${STAMP}.json" \
+              || { echo "::error::HF archive upload failed — forecast_${STAMP}.json"; exit 1; }
+          else
+            echo "forecast.json absent — nothing archived"
+          fi
+
+      # F2 (fm-evaluation-2026-07.md §7.4): ECMWF AIFS known-future weather
+      # covariates for the same city list — evaluation-only archive (never the
+      # public forecast.json). Verified live 2026-07-28: working model string is
+      # `ecmwf_aifs025_single` (`ecmwf_aifs025` returns all-null);
+      # boundary_layer_height is NOT served by AIFS (all-null) so it is not
+      # requested — no fabricated covariates. Data CC-BY-4.0.
+      - name: Collect + archive AIFS weather covariates (F2)
+        run: |
+          cat > collect_aifs.py << 'SCRIPT'
+          """Open-Meteo ECMWF AIFS weather covariate collector (F2, eval archive).
+
+          City list = forecast.json written by the CAMS step (single source).
+          Fail-soft per city; if every city fails, exit 0 without an artifact.
+          """
+          import json, sys, time, urllib.request
+          from datetime import datetime, timezone
+
+          HOURLY = "temperature_2m,relative_humidity_2m,wind_speed_10m,surface_pressure"
+          MODEL = "ecmwf_aifs025_single"
+          FORECAST_DAYS = 3  # 72h — covers the 24h eval horizon + slack
+          DELAY = 0.3
+
+          try:
+              with open("forecast.json") as f:
+                  cities = json.load(f).get("cities", [])
+          except Exception as e:
+              print(f"forecast.json unreadable — skip AIFS archive: {e}", file=sys.stderr)
+              sys.exit(0)
+
+          out_cities = []
+          for city in cities:
+              url = (
+                  "https://api.open-meteo.com/v1/forecast"
+                  f"?latitude={city['lat']}&longitude={city['lon']}"
+                  f"&hourly={HOURLY}&models={MODEL}"
+                  f"&forecast_days={FORECAST_DAYS}&timezone=UTC"
+              )
+              for attempt in range(3):
+                  try:
+                      data = json.loads(urllib.request.urlopen(url, timeout=15).read())
+                      hourly = data.get("hourly", {})
+                      if not hourly.get("time"):
+                          raise ValueError("empty hourly")
+                      out_cities.append({
+                          "name": city["name"],
+                          "lat": city["lat"],
+                          "lon": city["lon"],
+                          "country_code": city.get("country_code", ""),
+                          "hourly": hourly,
+                      })
+                      break
+                  except Exception as e:
+                      print(f"  {city['name']} attempt {attempt}: {e}", file=sys.stderr)
+                      time.sleep(2 * (attempt + 1))
+              time.sleep(DELAY)
+
+          if not out_cities:
+              print("All AIFS fetches failed — nothing archived", file=sys.stderr)
+              sys.exit(0)
+
+          payload = {
+              "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "model": MODEL,
+              "source": "open-meteo-ecmwf-aifs",
+              "license": "CC-BY-4.0",
+              "variables": HOURLY.split(","),
+              "cities": out_cities,
+          }
+          with open("aifs_weather.json", "w") as f:
+              json.dump(payload, f)
+          print(f"aifs_weather.json: {len(out_cities)}/{len(cities)} cities")
+          SCRIPT
+          python3 collect_aifs.py
+          if [ -f aifs_weather.json ]; then
+            STAMP=$(date -u +%Y%m%dT%H)
+            python3 scripts/etl/hf_publish.py upload \
+              --src aifs_weather.json --dest "aq-data/forecast-archive/aifs_weather_${STAMP}.json" \
+              || { echo "::error::HF archive upload failed — aifs_weather_${STAMP}.json"; exit 1; }
+          else
+            echo "aifs_weather.json absent — nothing archived"
+          fi

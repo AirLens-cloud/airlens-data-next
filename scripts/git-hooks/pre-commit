@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Minimal secret gate: gitleaks over staged changes (config = repo gitleaks.toml).
+set -euo pipefail
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks protect --staged --config=gitleaks.toml --no-banner
+else
+  echo "warn: gitleaks not installed — secret scan skipped (brew install gitleaks)" >&2
+fi

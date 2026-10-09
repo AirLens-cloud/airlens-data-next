@@ -1,0 +1,157 @@
+name: News Collect (6h)
+
+# Supabase Storage 402(quota) 로 news-aggregator Edge Function 이 2026-08-16 부터
+# 전량 실패 — Supabase 은퇴 확정에 따라 Edge Function 호출을 걷어내고
+# firms-collect.yml 골격(테스트 가능한 단일 정본 스크립트 + HF dataset 발행)을
+# 그대로 따른다. 과거 기사 데이터는 복구 불가(사본 없음) — 이 워크플로 첫 실행부터
+# 신규로 누적한다. Edge Function 파일 자체는 참조 원본으로 남겨두고(삭제하지 않음)
+# 이 워크플로에서 호출만 끊는다.
+#
+# firms 와의 구조적 차이: firms 는 매 실행 전체 스냅샷을 통째로 교체하지만, 뉴스는
+# 직전 발행본을 내려받아 article_url 기준으로 병합·누적한다(scripts/etl/collect_news.py
+# 의 merge_articles) — 이번 실행에서 못 받은 피드의 기사도 사라지지 않는다.
+
+on:
+  schedule:
+    - cron: '15 0,6,12,18 * * *'  # 매 6시간 (00:15, 06:15, 12:15, 18:15 UTC)
+  workflow_dispatch:                # 수동 실행 가능
+
+concurrency:
+  group: news-collect
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect-news:
+    if: github.repository == 'AirLens-cloud/airlens-data'
+    # 수집기(collect_news.py)는 stdlib-only, pip 은 hf_publish 용 huggingface_hub 뿐
+    # (아래 setup-python 필요).
+    # 2026-10-10 public 전환 → hosted 복귀 (public repo 의 hosted 분은 무료, self-hosted 러너는 fork 노출 위험).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # cron 6h × 3회 미스까지 관용 — firms-collect.yml 과 동일 근거(반복되는 일시
+      # 장애를 초록불로 숨기지 않는다). 뉴스는 병합 누적이라 firms보다도 stale 위험이
+      # 낮지만(한두 피드 죽어도 기존 기사가 남는다) refTime 자체가 안 갱신되는 경우
+      # (모든 피드 동시 실패)는 여전히 감지해야 한다.
+      MAX_STALENESS_HOURS: "18"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # firms-collect.yml 과 동일 근거: 시스템 python3.12 (PEP 668 externally-managed) 의
+      # bare `pip install` 거부를 피하려 3.11 로 고정한다.
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.11'
+
+      # 병합 누적을 위해 직전 발행본을 먼저 받는다. 첫 실행(HF 에 파일이 아직
+      # 없음)은 404 — 그대로 두면 collect_news.py 가 빈 베이스라인으로 진행한다
+      # (--existing 에 존재하지 않는 경로를 넘겨도 안전, load_existing 참고).
+      - name: Download previous published articles.json (baseline for merge)
+        run: |
+          curl -sL -w "\n%{http_code}\n" \
+            "https://huggingface.co/datasets/Robeedau/airlens-live/resolve/main/news-data/articles.json" \
+            -o existing-articles.json | tail -1 | tee /tmp/prev-http-code
+          CODE=$(cat /tmp/prev-http-code)
+          if [ "$CODE" != "200" ]; then
+            echo "이전 발행본 없음 (HTTP $CODE) — 빈 베이스라인으로 진행 (최초 실행이면 정상)"
+            rm -f existing-articles.json
+          fi
+
+      # 수집기 본문·주석·가드는 scripts/etl/collect_news.py 에 있고
+      # scripts/etl/test_collect_news.py (CI: pr-check etl-tests) 가 시험한다.
+      # RSS 소스 목록·파싱·정규화·slug 생성 규칙은 news-aggregator Edge Function
+      # (apps/web/supabase/functions/news-aggregator/) 에서 그대로 이식했다 —
+      # 그 파일은 참조 원본으로 남아있고 이 워크플로가 더 이상 호출하지 않는다.
+      - name: Collect news RSS feeds
+        run: |
+          if [ -f existing-articles.json ]; then
+            python3 scripts/etl/collect_news.py --out articles.json --existing existing-articles.json
+          else
+            python3 scripts/etl/collect_news.py --out articles.json
+          fi
+
+      - name: Install huggingface_hub
+        run: python3 -m pip install --quiet "huggingface_hub>=0.34,<2"
+
+      # hf_publish.py 는 빈 파일 업로드를 거부한다. collect_news.py 는 수집 0건이면
+      # articles.json 자체를 쓰지 않고 exit 1 하므로(이전 발행본을 덮지 않기 위해),
+      # 이 스텝은 파일이 없으면 조용히 스킵한다 (firms-collect.yml 과 동일 패턴).
+      - name: Upload to HF dataset repo (news-data/articles.json)
+        run: |
+          if [ ! -f articles.json ]; then
+            echo "발행할 payload 가 없다 (수집 0건) — 업로드 생략"
+            exit 0
+          fi
+          python3 scripts/etl/hf_publish.py upload \
+            --src articles.json --dest news-data/articles.json \
+            || { echo "::error title=HF upload failed::news-data/articles.json — 옛 버전이 그대로 발행된다"; exit 1; }
+
+      - name: Verify freshness (live probe)
+        if: always()
+        run: |
+          cat > check_freshness.py << 'SCRIPT'
+          import json, os, sys, urllib.request, urllib.error
+          from datetime import datetime, timezone
+
+          cache_bust = os.environ.get("GITHUB_RUN_ID", "local") + "-" + os.environ.get("GITHUB_RUN_ATTEMPT", "1")
+          url = (
+              "https://huggingface.co/datasets/Robeedau/airlens-live/resolve/main/"
+              f"news-data/articles.json?cb={cache_bust}"
+          )
+          max_hours = float(os.environ["MAX_STALENESS_HOURS"])
+
+          try:
+              req = urllib.request.Request(url, headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+              raw = urllib.request.urlopen(req, timeout=30).read().decode("utf-8")
+          except urllib.error.HTTPError as e:
+              if e.code == 404:  # 최초 실행: 아직 baseline 없음 — 거짓 실패 아님
+                  print("::warning title=News freshness::no articles.json yet (404) — baseline pending")
+                  sys.exit(0)
+              print(f"::error title=News freshness::read failed HTTP {e.code} {e.reason}", file=sys.stderr)
+              sys.exit(1)
+          except Exception as e:
+              print(f"::error title=News freshness::probe request failed: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          try:
+              data = json.loads(raw)
+              ref = data["refTime"]
+          except (ValueError, KeyError) as e:
+              print(f"::error title=News freshness::stored object missing/invalid refTime: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          ref_dt = datetime.fromisoformat(ref)
+          if ref_dt.tzinfo is None:
+              ref_dt = ref_dt.replace(tzinfo=timezone.utc)
+          age_h = (datetime.now(timezone.utc) - ref_dt).total_seconds() / 3600
+          print(f"stored refTime={ref} age={age_h:.1f}h count={data.get('count', '?')} threshold={max_hours}h")
+
+          if age_h > max_hours:
+              print(f"::error title=News stale::articles.json is {age_h:.1f}h old (> {max_hours}h SLA) — 모든 RSS 피드가 반복 실패 중일 가능성", file=sys.stderr)
+              sys.exit(1)
+
+          count = data.get("count")
+          if not isinstance(count, int) or count <= 0:
+              print(
+                  f"::error title=News empty::articles.json is fresh ({age_h:.1f}h) but count={count!r} "
+                  "— 병합 누적 설계상 정상 발행이면 0 이 될 수 없다.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          print(f"::notice title=News fresh::articles.json {age_h:.1f}h old, count={count} (within {max_hours}h SLA)")
+          SCRIPT
+          python3 check_freshness.py
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## News Collect Result" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Triggered at: $(date -u '+%Y-%m-%d %H:%M UTC')" >> "$GITHUB_STEP_SUMMARY"

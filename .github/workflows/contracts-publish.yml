@@ -1,0 +1,51 @@
+name: Evidence Contract — Producer Manifests
+
+# EVIDENCE_CONTRACT.md (Obsidian-airlens/raw/docs/platform/EVIDENCE_CONTRACT.md) §5
+# producer 의무 1단계. scripts/publish_contracts.py 가 HF `Robeedau/airlens-live` 의
+# 실제 파일 트리를 조회해 meta/product_manifest.json · meta/source_registry.json ·
+# meta/product_health.json 세 발행물을 만들고 그대로 되쓴다(다른 워크플로가 쓰는
+# aq-data/wind-data/... 경로는 건드리지 않는다 — 순수 추가).
+#
+# 다른 heavy 수집 워크플로(GRIB decode, RSS parse 등)와 달리 이 워크플로는 HF 트리
+# 메타데이터만 읽는다(파일 내용 다운로드 없음) — mac-snapshot-healthcheck.yml /
+# e2-shadow-freshness.yml 과 같은 "probe" 성격이라 hosted ubuntu-latest 로 충분하다.
+
+on:
+  schedule:
+    - cron: '50 */3 * * *'  # 3h, 다른 3h 잡(data-collect :05, timeline :35)과 분단위로 분리
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish-contracts:
+    if: github.repository == 'AirLens-cloud/airlens-data'
+    # 2026-10-10 public 전환 → hosted 복귀 (public repo 의 hosted 분은 무료, self-hosted 러너는 fork 노출 위험).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: python3 -m pip install --quiet -r requirements.txt
+
+      # 카탈로그(PRODUCTS/SOURCES) 오타·스키마 드리프트를 실제 HF 조회 전에 잡는다
+      # (15 conformance test, 네트워크 호출 0 — fake fixture 로 순수 함수만 시험).
+      - name: Conformance tests (schema + catalog integrity)
+        run: python3 -m pytest scripts/test_publish_contracts.py -v
+
+      # main() 이 --publish 여부와 무관하게 항상 먼저 contracts/*.schema.json 로
+      # 검증한다(publish_contracts.py::validate_all) — 스키마 불일치면 여기서 fail-loud,
+      # HF 에는 아무것도 올라가지 않는다.
+      - name: Generate + validate + publish meta/*.json to HF dataset repo
+        run: python3 scripts/publish_contracts.py --publish

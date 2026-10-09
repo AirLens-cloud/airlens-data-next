@@ -1,0 +1,46 @@
+[Unit]
+Description=AirLens Field Assistant chat-log pull (R2 buffer → local SQLite)
+Documentation=https://github.com/AirLens-cloud/airlens-web
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/airlens/sidecar
+ExecStart=/usr/bin/python3 /opt/airlens/sidecar/chatlog_pull.py
+
+# Secrets as files, never as literals (systemd LoadCredential pattern).
+# One file, three key=value lines (account_id / access_key_id /
+# secret_access_key), and the token must be scoped to the airlens-chatlog
+# bucket alone — the same Cloudflare account holds airlens-models and
+# airlens-captures, which this job has no business reaching.
+LoadCredential=cf_r2_chatlog:/etc/airlens/cf_r2_chatlog
+
+Environment=CHATLOG_DB=/var/lib/airlens/chatlog/chatlog.db
+Environment=CHATLOG_BUCKET=airlens-chatlog
+
+# 1GB box: keep any OOM inside this unit's cgroup (sshd must survive).
+# Lower than the collectors' 400M — this job holds one small JSON object at a
+# time, so anything near that ceiling means something is wrong.
+MemoryAccounting=yes
+MemoryHigh=100M
+MemoryMax=150M
+
+# One retry absorbs a transient blip; the next hourly slot is the real retry.
+# Nothing is lost by waiting: objects stay in R2 until this job removes them,
+# and the bucket's own 7-day lifecycle is the outer backstop.
+Restart=on-failure
+RestartSec=90s
+StartLimitBurst=2
+TimeoutStartSec=5min
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/airlens
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
