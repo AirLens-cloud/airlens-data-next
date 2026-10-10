@@ -11,6 +11,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 import urllib.error
 import urllib.request
 from email.message import Message
@@ -535,3 +536,73 @@ def test_fetch_with_retry_feeds_429_headers_to_limiter(monkeypatch):
     assert data == {"results": []}
     assert lim.last_remaining == 0
     assert lim.reset_waits == 1
+
+
+_VALID_NAME_RE = re.compile(r"^openaq_[A-Z]{2}_(full|multi)_[0-9]{8}\.csv$")
+
+
+@pytest.mark.parametrize("bad_code", ["-99", "KOR", "12", "K1", " KR"])
+def test_main_drops_rows_with_non_iso_country_code(monkeypatch, tmp_path, capsys, bad_code):
+    # Arrange — 국가코드가 ISO 2자리 대문자가 아닌 관측소(id=300)를 섞는다
+    monkeypatch.setenv("OPENAQ_API_KEY", FAKE_KEY)
+    locations = {"results": [
+        {"id": 100, "name": "Seoul A", "country": {"code": "KR"}},
+        {"id": 200, "name": "NYC A", "country": {"code": "US"}},
+        {"id": 300, "name": "Unknown", "country": {"code": bad_code}},
+    ]}
+    _dispatch_urlopen(monkeypatch, {
+        "/v3/parameters?": _PARAMETERS_RESPONSE,
+        "/v3/locations?": locations,
+        "/v3/parameters/2/latest": _PM25_LATEST_RESPONSE,
+        "/v3/parameters/1/latest": _PM10_LATEST_RESPONSE,
+    })
+
+    # Act
+    rc = m.main(["--out", str(tmp_path), "--date-tag", "20260906"])
+
+    # Assert — 해당 코드의 파일·폴더·manifest 항목이 없고, 제외 건수가 한 줄로 출력됨
+    assert rc == 0
+    assert not any(bad_code.strip() and bad_code in p.name for p in tmp_path.rglob("*"))
+    assert sorted(p.name for p in (tmp_path / "2026-09").iterdir()) == [
+        "openaq_KR_multi_20260906.csv", "openaq_US_multi_20260906.csv",
+    ]
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    names = [f["name"] for f in manifest["files"]]
+    assert sorted(names) == ["openaq_KR_multi_20260906.csv", "openaq_US_multi_20260906.csv"]
+    assert all(_VALID_NAME_RE.match(n) for n in names)
+    out_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("dropped ")]
+    assert out_lines == [f"dropped 1 row(s) with non-ISO country codes: {[bad_code]}"]
+
+
+def test_main_prints_no_drop_line_when_all_codes_valid(monkeypatch, tmp_path, capsys):
+    # Arrange
+    monkeypatch.setenv("OPENAQ_API_KEY", FAKE_KEY)
+    _happy_path_dispatch(monkeypatch)
+
+    # Act
+    rc = m.main(["--out", str(tmp_path), "--date-tag", "20260906"])
+
+    # Assert — 제외 대상이 없으면 "dropped" 줄을 찍지 않는다
+    assert rc == 0
+    assert "dropped" not in capsys.readouterr().out
+
+
+def test_main_aborts_when_every_country_code_is_non_iso(monkeypatch, tmp_path, capsys):
+    # Arrange
+    monkeypatch.setenv("OPENAQ_API_KEY", FAKE_KEY)
+    _dispatch_urlopen(monkeypatch, {
+        "/v3/parameters?": _PARAMETERS_RESPONSE,
+        "/v3/locations?": {"results": [
+            {"id": 100, "name": "Unknown", "country": {"code": "-99"}},
+            {"id": 200, "name": "Unknown 2", "country": {"code": "-99"}},
+        ]},
+        "/v3/parameters/2/latest": _PM25_LATEST_RESPONSE,
+    })
+
+    # Act
+    rc = m.main(["--out", str(tmp_path), "--date-tag", "20260906"])
+
+    # Assert — 기존 "0 rows assembled" 경로 유지, manifest 미생성
+    assert rc == 1
+    assert "0 rows assembled" in capsys.readouterr().err
+    assert not (tmp_path / "manifest.json").exists()

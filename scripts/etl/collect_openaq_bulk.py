@@ -44,6 +44,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -52,6 +53,10 @@ import urllib.request
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+
+# 소비자 allowlist(`^openaq_[A-Z]{2}_(full|multi)_[0-9]{8}\.csv$`) 와 정합 — 이 형태가 아닌 국가코드
+# (OpenAQ 의 미상 국가 "-99" 등)는 한 건만 섞여도 소비자 sync 가 전체 실패한다.
+ISO2_RE = re.compile(r"[A-Z]{2}")
 
 API_BASE = "https://api.openaq.org/v3"
 
@@ -491,12 +496,18 @@ def main(argv: list[str] | None = None) -> int:
     skipped_no_timestamp = 0
     skipped_no_coords = 0
     skipped_country_filtered = 0
+    dropped_non_iso_rows = 0
+    dropped_non_iso_codes: set[str] = set()
     for lid, pm25_r in pm25_readings.items():
         meta = locations_meta.get(lid)
         if meta is None:
             skipped_no_location_meta += 1
             continue
         cc = meta["country_code"]
+        if not ISO2_RE.fullmatch(cc):
+            dropped_non_iso_rows += 1
+            dropped_non_iso_codes.add(cc)
+            continue
         if countries_filter and cc not in countries_filter:
             skipped_country_filtered += 1
             continue
@@ -525,6 +536,10 @@ def main(argv: list[str] | None = None) -> int:
             if extra_r is not None:
                 row[extra] = round(extra_r["value"], 2)
         by_country[cc].append(row)
+
+    if dropped_non_iso_rows:
+        print(f"dropped {dropped_non_iso_rows} row(s) with non-ISO country codes: "
+              f"{sorted(dropped_non_iso_codes)}")
 
     if not by_country:
         print("ERROR: 0 rows assembled after country grouping — abort.", file=sys.stderr)
