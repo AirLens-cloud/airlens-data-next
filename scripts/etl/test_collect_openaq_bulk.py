@@ -255,8 +255,8 @@ def test_main_happy_path_writes_per_country_csv_and_manifest(monkeypatch, tmp_pa
     assert rc == 0
     assert not any("/parameters/7/latest" in u for u in calls)
 
-    kr_path = tmp_path / "openaq_KR_multi_20260906.csv"
-    us_path = tmp_path / "openaq_US_multi_20260906.csv"
+    kr_path = tmp_path / "2026-09" / "openaq_KR_multi_20260906.csv"
+    us_path = tmp_path / "2026-09" / "openaq_US_multi_20260906.csv"
     assert kr_path.exists()
     assert us_path.exists()
 
@@ -287,14 +287,18 @@ def test_main_happy_path_writes_per_country_csv_and_manifest(monkeypatch, tmp_pa
     assert not any(r["station_id"] == "300" for r in rows + us_rows)
     assert not any(r["station_id"] == "400" for r in rows + us_rows)
 
+    # CSV 는 월별 하위 폴더에만 — prefix 바로 아래에는 manifest 와 월 폴더뿐(HF 폴더당 1만 개 상한)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["2026-09", "manifest.json"]
+
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert {f["name"] for f in manifest["files"]} == {
         "openaq_KR_multi_20260906.csv", "openaq_US_multi_20260906.csv",
     }
     for entry in manifest["files"]:
-        digest = hashlib.sha256((tmp_path / entry["name"]).read_bytes()).hexdigest()
+        assert entry["path"] == f"2026-09/{entry['name']}"
+        digest = hashlib.sha256((tmp_path / entry["path"]).read_bytes()).hexdigest()
         assert entry["sha256"] == digest
-        assert entry["bytes"] == (tmp_path / entry["name"]).stat().st_size
+        assert entry["bytes"] == (tmp_path / entry["path"]).stat().st_size
         assert entry["rows"] == 1
 
 
@@ -308,8 +312,8 @@ def test_main_country_filter_narrows_output(monkeypatch, tmp_path):
 
     # Assert — 소문자 입력도 대문자로 정규화되어 매칭, US 파일은 생성되지 않음
     assert rc == 0
-    assert (tmp_path / "openaq_KR_multi_20260906.csv").exists()
-    assert not (tmp_path / "openaq_US_multi_20260906.csv").exists()
+    assert (tmp_path / "2026-09" / "openaq_KR_multi_20260906.csv").exists()
+    assert not (tmp_path / "2026-09" / "openaq_US_multi_20260906.csv").exists()
 
 
 def test_main_aborts_when_pm25_parameter_id_unresolvable(monkeypatch, tmp_path, capsys):
@@ -360,7 +364,7 @@ def test_main_partial_output_when_budget_exhausted_mid_run(monkeypatch, tmp_path
     assert rc == 0
     out = capsys.readouterr().out
     assert "request budget (3) exhausted" in out
-    with open(tmp_path / "openaq_KR_multi_20260906.csv", newline="", encoding="utf-8") as f:
+    with open(tmp_path / "2026-09" / "openaq_KR_multi_20260906.csv", newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     assert rows[0]["pm25"] == "15.5"
     assert rows[0]["pm10"] == ""  # pm10 fetch 는 예산 소진으로 스킵됨
@@ -390,7 +394,7 @@ def test_main_timestampless_duplicate_sensor_does_not_erase_valid_reading(monkey
 
     # Assert — 관측소가 살아있고, 값·시각 모두 유효 레코드의 것
     assert rc == 0
-    with open(tmp_path / "openaq_KR_multi_20260906.csv", newline="", encoding="utf-8") as f:
+    with open(tmp_path / "2026-09" / "openaq_KR_multi_20260906.csv", newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     assert len(rows) == 1
     assert rows[0]["pm25"] == "15.5"
@@ -421,8 +425,8 @@ def test_main_isolates_record_with_malformed_coordinates(monkeypatch, tmp_path):
 
     # Assert — 크래시 없이 성공, 정상 레코드(KR)만 발행, 비정상(US)은 파일 자체 없음
     assert rc == 0
-    assert (tmp_path / "openaq_KR_multi_20260906.csv").exists()
-    assert not (tmp_path / "openaq_US_multi_20260906.csv").exists()
+    assert (tmp_path / "2026-09" / "openaq_KR_multi_20260906.csv").exists()
+    assert not (tmp_path / "2026-09" / "openaq_US_multi_20260906.csv").exists()
 
 
 # ── 서버 보고 잔여 할당(x-ratelimit-*) 반영 ──────────────────────────────────

@@ -15,7 +15,7 @@ Hugging Face 데이터셋 [`Robeedau/airlens-live`](https://huggingface.co/datas
 | `news-collect` | 6h | RSS 뉴스 → `news-data/articles.json` |
 | `mac-data-publish` | 1h | CAMS + GEFS-chem + AirKorea + EEA → `mac-data/data/{mac,web}/v1/` |
 | `hf-live-squash` | 주간(일 19:20 UTC) | HF repo 히스토리 squash (용량 관리) |
-| `openaq-bulk-collect` | 일간(01:45 UTC) | OpenAQ 파라미터별 벌크 수집 → `insights-data/openaq-bulk/` |
+| `openaq-bulk-collect` | 일간(01:45 UTC) | OpenAQ 파라미터별 벌크 수집 → `insights-data/openaq-bulk/{YYYY-MM}/` (+ `manifest.json`) |
 | `policy-collect` | 주간(일 04:00 UTC) | 대기질 정책 레지스트리 → `insights-data/policy/` |
 | `contracts-publish` | 3h | 산출물 계약 manifest/registry/health 생성 → `meta/` (`product_manifest.json`·`source_registry.json`·`product_health.json`) |
 | `shadow-retention` | 일간(02:40 UTC) | E2 사이드카 shadow 슬롯 14일 초과분 정리 → `openaq-shadow/`, `sensor-community-shadow/` |
