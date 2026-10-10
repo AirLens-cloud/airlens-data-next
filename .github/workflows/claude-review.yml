@@ -1,0 +1,59 @@
+name: Claude PR Review
+
+on:
+  pull_request:
+    branches: [main]
+    # PR 을 열거나 다시 열거나 draft 를 풀 때 리뷰한다. push 마다 돌리지 않아 크레딧을 아낀다.
+    # 다시 받으려면 PR 에 "@claude 이 PR 리뷰해줘"처럼 요청한다 (claude.yml).
+    types: [opened, reopened, ready_for_review]
+
+permissions: {}
+
+jobs:
+  review:
+    name: Claude Review
+    # 과금·만료·앱 토큰 범위는 claude.yml 머리 주석 참고. 드래프트·bot(Dependabot 등)·fork PR 은 건너뛴다.
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.type != 'Bot' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # job 단위라 if 로 건너뛰는 run 은 그룹에 들어오지 않는다.
+    concurrency:
+      group: claude-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude review
+        uses: anthropics/claude-code-action@46a42b43239748e5b25771606bf1f551c3b1b517  # v1.0.232
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # actions: read 는 여기서 쓰지 않는다. 값이 있어야 앱 토큰을 좁혀 받는다 (claude.yml 머리 주석).
+          additional_permissions: |
+            actions: read
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            이 PR 을 리뷰하라. `gh pr diff` 로 변경을 읽고, 필요하면 레포 파일을 읽어 맥락을 확인한다.
+
+            - 본다: 동작 오류(로직·경계값·비동기·에러 처리), 보안(secret 노출·인젝션·권한), 데이터 안전, 빠진 테스트.
+            - 보지 않는다: 포맷·이름 같은 취향 문제.
+            - 구체적인 문제는 해당 줄에 인라인 코멘트로 단다. 근거와 고칠 방향을 함께 적는다.
+            - 마지막에 `gh pr comment` 로 요약 코멘트를 하나만 남긴다: 차단 이슈 / 권장 / 확인하지 못한 것.
+            - 문제가 없으면 요약에 그렇게 짧게 적는다.
+            - 한국어로 쓴다.
+          # gh pr view 는 주지 않는다 — --comments 로 외부인 코멘트를 읽어 올 수 있다.
+          claude_args: |
+            --model claude-sonnet-5-5
+            --max-turns 15
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*)"
