@@ -43,7 +43,7 @@ HF 초기 시드(hf-live-seed)는 모노레포 정적 데이터 의존이라 이
 
 | 이름 | 용도 |
 |---|---|
-| `HF_TOKEN` | HF `Robeedau/airlens-live` write (전 워크플로) |
+| `HF_TOKEN` | HF `Robeedau/airlens-live` write (HF에 쓰는 워크플로 전부) |
 | `NASA_FIRMS_MAP_KEY` | firms-collect |
 | `CDS_API_KEY` | mac-data-publish (Copernicus ADS — CAMS. `CDS_API_URL`은 워크플로에 하드코딩) |
 | `AIRKOREA_API_KEY` | mac-data-publish (공공데이터포털 에어코리아) |

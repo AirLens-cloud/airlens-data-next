@@ -1,21 +1,22 @@
 # contracts
 
 `Robeedau/airlens-live`에 올라가는 발행물의 계약을 둔다. 발행 코드(`scripts/etl/hf_publish.py`, `scripts/publish_contracts.py`)와
-같은 레포에 있어야 발행 직전 검사에서 빠지는 계약이 생기지 않는다. 다른 레포에서 쓸 때는 이 레포의 태그를 기준으로 가져간다. 고칠 일이 있으면 여기서 고친다.
+같은 레포에 있어야 발행 직전 검사에서 빠지는 계약이 생기지 않는다. 고칠 일이 있으면 여기서 고친다.
 
 - [`EVIDENCE_CONTRACT.md`](EVIDENCE_CONTRACT.md): 사용자에게 보이는 값이 지켜야 할 규칙. 아래 스키마 대부분이 이 문서의 절을 구현한다.
-- [`validate.py`](validate.py): 표준 라이브러리만 쓰는 검증기. 지원하지 않는 스키마 키워드가 있으면 검증을 시작하기 전에 실패한다.
+- [`validate.py`](validate.py): 표준 라이브러리만 쓰는 검증기. 수집 격자 계약 2종을 검사하며 지원하지 않는 스키마 키워드가 있으면 검증을 시작하기 전에 실패한다.
+  나머지 계약은 `jsonschema`로 검사한다(아래 표의 '검사' 열).
 
 ## 스키마
 
-| 계약 | 발행물 | 만드는 곳 | EVIDENCE_CONTRACT |
-|---|---|---|---|
-| `current-aq-grid.v1` | `aq-data/current-{pm25,pm10}-grid.json` | `scripts/etl/collect_noaa_aq.py` (`data-collect-hourly.yml`) | — |
-| `web-aq-grid.v1` | `mac-data/data/web/v1/current-{pm25,pm10}-grid.json` | `scripts/etl/build_web_aq_grid.py` (`mac-data-publish.yml`) | — |
-| `data-product-manifest.v1` | `meta/product_manifest.json` | `scripts/publish_contracts.py` (`contracts-publish.yml`) | §5-1 |
-| `source-registry.v1` | `meta/source_registry.json` | 위와 같음 | §5-4 |
-| `product-health.v1` | `meta/product_health.json` | 위와 같음 | §5-5 |
-| `evidence-envelope.v1` | 사용자에게 보이는 값 하나의 최소 단위 | 아직 발행물 없음 (테스트에서만 사용) | §2 |
+| 계약 | 발행물 | 만드는 곳 | 검사 | EVIDENCE_CONTRACT |
+|---|---|---|---|---|
+| `current-aq-grid.v1` | `aq-data/current-{pm25,pm10}-grid.json` | `scripts/etl/collect_noaa_aq.py` (`data-collect-hourly.yml`) | `validate.py` (`hf_publish.py --schema`) | — |
+| `web-aq-grid.v1` | `mac-data/data/web/v1/current-{pm25,pm10}-grid.json` | `scripts/etl/build_web_aq_grid.py` (`mac-data-publish.yml`) | `validate.py` (`hf_publish.py --schema`) | — |
+| `data-product-manifest.v1` | `meta/product_manifest.json` | `scripts/publish_contracts.py` (`contracts-publish.yml`) | `jsonschema` (`publish_contracts.py`) | §5-1 |
+| `source-registry.v1` | `meta/source_registry.json` | 위와 같음 | 위와 같음 | §5-4 |
+| `product-health.v1` | `meta/product_health.json` | 위와 같음 | 위와 같음 | §5-5 |
+| `evidence-envelope.v1` | 사용자에게 보이는 값 하나의 최소 단위 | 아직 발행물 없음 (테스트에서만 사용) | `jsonschema` (테스트) | §2 |
 
 `current-aq-grid.v1`과 `web-aq-grid.v1`은 파일 이름이 같지만 다른 계약이다. 앞의 것은 조밀 격자이고 뒤의 것은 웹용으로 줄인 희소 격자다.
 
@@ -24,20 +25,25 @@ ML 예측 산출물의 스키마(`grid_latest.v1`, `data_quality.v1` 등)는 아
 ## 검증
 
 ```bash
-python3 contracts/validate.py <payload.json>                             # payload의 schema_version으로 계약을 고른다
-python3 contracts/validate.py <payload.json> --schema current-aq-grid.v1 # 계약 이름이나 경로를 직접 준다
+python3 contracts/validate.py <payload.json> --schema current-aq-grid.v1 # 계약 이름이나 경로를 준다
+python3 contracts/validate.py <payload.json>                             # 기본값 --schema auto
 ```
 
-`schema_version`(계약 이름)을 싣는 산출물은 기본값 `--schema auto`로 검증한다. 수집 산출물의 `schemaVersion`은 `"1.0"` 같은
-숫자 버전이어서 계약 이름을 직접 줘야 한다. 발행할 때는 `hf_publish.py --schema …`가 업로드 직전에 같은 검증을 한다.
+`--schema auto`는 payload의 `schema_version`(계약 이름)으로 계약을 고른다. 이 필드는 ML 산출물이 싣고, 그 계약은 아직 이 폴더에 없다.
+이 폴더의 수집 산출물은 `schemaVersion`에 `"1.0"` 같은 숫자 버전을 싣기 때문에 계약 이름을 직접 줘야 한다. 발행할 때는
+`hf_publish.py --schema …`가 업로드 직전에 같은 검증을 하고, `meta/*.json` 계약 3종은 `publish_contracts.py`가 발행 전에 `jsonschema`로 검사한다.
 
-지원 키워드는 `type`, `properties`, `required`, `items`, `enum`, `const`, `additionalProperties`(bool), `minimum`, `maximum`,
-`minItems`, `format`(`date-time`만)이다. 다른 키워드가 필요하면 `validate.py`에 먼저 구현하고 테스트를 붙인 다음 스키마에 쓴다.
+`validate.py`가 검증에 쓰는 키워드는 `type`, `properties`, `required`, `items`, `enum`, `const`, `additionalProperties`(bool), `minimum`,
+`maximum`, `minItems`, `format`(`date-time`만)이다. 설명용 키워드(`$schema`, `$id`, `title`, `description`, `examples`, `deprecated`)는
+허용만 한다. `validate.py`로 검사하는 계약에 다른 키워드가 필요하면 `validate.py`에 먼저 구현하고 테스트를 붙인 다음 스키마에 쓴다.
+`jsonschema`로 검사하는 계약은 `$ref`, `pattern`, `if`/`then` 같은 키워드도 쓴다.
 
 ## DQSS
 
 DQSS(Data Quality Scoring System)는 관측소마다 매기는 데이터 품질 점수이고 이 절이 그 정의다. 계산은 ML 파이프라인의 규칙 기반 엔진(`RuleBasedDQSS`)이 맡는다.
-결과는 `aq-data/data_quality.json`(`data_quality.v1`)과 `aq-data/quality-history/`로 발행된다.
+결과는 `aq-data/data_quality.json`(`data_quality.v1`)과 `aq-data/quality-history/`로 발행된다. 발행 직전 정보량 게이트를 통과하지 못하면
+같은 경로에 보류 문서(`data_quality_withheld.v1`, `stations`는 빈 배열)가 대신 올라간다. 소비자는 `schema_version`으로 둘을 구분하고
+보류 문서를 받으면 점수 대신 보류 사유를 보여 준다.
 
 ### 점수
 
@@ -66,9 +72,9 @@ DQSS(Data Quality Scoring System)는 관측소마다 매기는 데이터 품질 
 | `Unreliable` | 20 미만 |
 
 - 반올림 전 점수로 판정한다. 컷 80/50/20은 외부 기준에 맞춘 값이 아니며 발행물도 `meta.cutoff_basis`에 그렇게 밝힌다.
-- `measured_weight`가 60 미만이면(다섯 요소 중 측정된 것이 셋 미만) 점수는 남기고 `badge`를
+- `measured_weight`가 60 미만이면(기본 가중치에서는 측정된 요소가 셋 미만일 때) 점수는 남기고 `badge`를
   `null`로 둔다(`reasons.grade` = `insufficient_measured_weight`). 측정된 요소가 하나도 없으면 점수도 `null`이다(`no_computable_components`).
-- 측정된 요소 가운데 하나라도 0점이면 `High`·`Medium`을 `Low`로 낮춘다(`component_floor_breach:<요소>`). 점수는 바꾸지 않는다.
+- 측정된 요소 가운데 하나라도 0점이면 `High`·`Medium`을 `Low`로 낮춘다(`component_floor_breach:<요소,…>`). 요소 이름은 계산 키를 쓰므로 model residual은 `residual`로 적힌다. 점수는 바꾸지 않는다.
 - 이상치 탐지 모델이 준비돼 있으면 이상치로 판정된 관측소의 점수를 깎고(파이프라인 기본 20점) 배지를 다시 매긴다.
   보류와 하향 규칙은 감점 뒤에도 그대로 적용된다. 감점은 `reasons.anomaly`에 남고 탐지를 돌렸는지는 `meta.anomaly_check`에 적힌다.
 - `reliability_score`와 `sensor_type_bonus`는 참고용 라벨이고 점수에 더하지 않는다.

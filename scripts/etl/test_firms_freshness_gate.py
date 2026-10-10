@@ -5,7 +5,7 @@
 heredoc 이라 어떤 스위트도 닿지 않았다. 여기서 YAML 에서 그대로 꺼내 실행한다 —
 사본을 두면 드리프트하고, 드리프트한 사본의 통과는 의미가 없다.
 
-이 테스트는 모노레포(`AirLens-cloud/AirLens`)에 있던 `scripts/ci/firms_freshness_guard_test.py`
+이 테스트는 비공개 모노레포에 있던 `scripts/ci/firms_freshness_guard_test.py`
 의 이식이다. 2026-09-26 모노레포의 FIRMS 크론이 은퇴하고 이 레포가 단일 발행자가
 되면서 그 테스트도 함께 지워졌는데, 이 레포에는 같은 게이트를 시험하는 것이 없었다
 (`test_collect_all_heredoc.py` 는 data-collect-hourly 전용).

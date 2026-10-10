@@ -43,13 +43,13 @@ Tailscale 접속, 주소는 private 런북)의 systemd 타이머가 매시 HF da
 
 ## 운영 원칙
 
-- **시크릿은 레포에 두지 않는다.** VM의 파일을 systemd `LoadCredential`로 주입하고,
+- **시크릿은 레포에 두지 않는다.** VM의 파일(root 소유, 0600)을 systemd `LoadCredential`로 주입하고,
   교체는 VM에서 파일만 바꾼다(oneshot 유닛이 슬롯마다 다시 읽으므로 재시작 불요).
 - 채팅 로그용 R2 토큰은 **`airlens-chatlog` 버킷 한정 Object Read & Write** 스코프여야
   한다. 계정 스코프 토큰이면 이 VM이 같은 계정의 다른 버킷까지 갖게 된다.
 - `deploy.sh`가 이 레포의 `scripts/etl/hf_publish.py`와 `contracts/`를 VM에 같은 상대
   구조로 설치한다. 운영 타이머(`run-global-shadow.sh`)는 레포 클론이 필요 없다.
-- 시크릿 파일 형식, VM 경로와 레거시 정리 대상, 접속 값은 비공개 런북에 있다.
+- 시크릿 파일 형식, VM 쪽 준비 사항과 레거시 정리 대상, 접속 값은 비공개 런북에 있다.
 
 ## 접속 / 배포 / 검증
 

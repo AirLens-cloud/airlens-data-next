@@ -32,7 +32,7 @@
 - `quality` 는 플랫폼 DQSS(규칙 기반 5요소 점수, 정의는 `contracts/README.md`)가 아니다. 이 파이프라인은
   DB/서버가 없는 정적 스냅샷이므로 신선도+완전성 기반의 단순 휴리스틱만 제공한다
   (`estimate_quality()` docstring 참조). "다른 quantity" 혼동 방지
-  ([[feedback_shared_name_hides_different_quantity]] 정합).
+  (이름이 같아도 다른 양일 수 있다).
 """
 from __future__ import annotations
 

@@ -6,13 +6,13 @@
 검사한다." 이 모듈은 그 4항목을 `mac_aq_adapter` 의 envelope/point/grid 계약 위에서 구현한다.
 
 **이 모듈은 `mac_aq_adapter.py`/`collect_cams_global.py`/`collect_gefs_chem_global.py` 를
-수정하지 않는다** — W5-a 계약 동결 + 병렬 W5-b(`claude/mac-p1-regional`) 파일 충돌 회피.
+수정하지 않는다** — W5-a 계약 동결 + 병렬 작업 W5-b와의 파일 충돌 회피.
 전부 신규 함수.
 
 정책 (팀 지시 + Glass-box 정합):
   - QA 실패 reading 은 **drop 하지 않는다** — quality 등급을 강등하고 카운트를 리포트에
     남긴다(silent drop 금지). 값 자체는 원본 그대로 보존한다(변조 금지 — 사용자가 원본을
-    보고 판단할 권리, `dqss-uncertainty-policy.md` 의 Glass-box 정신과 동일).
+    보고 판단할 권리, Glass-box 정신과 동일).
   - 물리 타당 범위(`POLLUTANT_BOUNDS`)는 설계 SOT 에 **명시되어 있지 않다** — 이 모듈이
     도입하는 보수적 기본값이다(WHO/EPA AQI breakpoint 표 + 기록된 극단 사례 참고, 하단 주석).
     실측 데이터로 조정 필요 시 후속 변경 대상.
@@ -25,8 +25,8 @@ import math
 from datetime import datetime, timezone
 
 # ────────────────────────── 물리 타당 범위 (µg/m3) ──────────────────────────
-# 근거: PM 두 항목은 2026-09-05 문헌 봉투로 앵커됨 (사용자 확정, 정본 = 모노레포
-# CS 설계 보강 팩 design-reinforcement-2026-09-05/findings.md Q9). 나머지 항목은
+# 근거: PM 두 항목은 2026-09-05 문헌 봉투로 앵커됨 (사용자 확정, 근거는 비공개 내부
+# 설계 노트 Q9). 나머지 항목은
 # 여전히 이 모듈의 보수적 기본값(설계 SOT 미지정). "명백히 깨진 값"(음수·decode
 # 오류·단위 혼동)만 잡도록 상한을 넉넉히 잡는다 — 실제 대기오염 극단치(산불
 # 연무·황사)를 false-positive 로 잡지 않는 것이 목적.

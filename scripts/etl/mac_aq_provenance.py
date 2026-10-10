@@ -5,7 +5,7 @@
 §"필수 레코드" — `source`/`sourceVersion`/`generatedAt`/`observedAt`/`validAt`/`attribution`
 필드가 이미 envelope 에 있다. 이 모듈은 그 필드들을 **흩어놓지 않고 한 곳(`provenance`
 블록)에 모아** mac 클라이언트가 "이 값이 어디서 왔나"를 한 번에 렌더링할 수 있게 한다
-(Glass-box 정합 — CLAUDE.md §4대 원칙 §3). 값 자체는 건드리지 않는다 — 순수 메타데이터 조립.
+(Glass-box 정합). 값 자체는 건드리지 않는다 — 순수 메타데이터 조립.
 
 `mac_aq_adapter.py` 는 수정하지 않는다 — 이 모듈은 그 위에 얹는 신규 계층.
 """
