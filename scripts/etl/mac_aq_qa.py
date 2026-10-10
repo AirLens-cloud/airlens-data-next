@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """macOS 무료 글로벌 근실시간 대기질 파이프라인 — QA(품질 검증) 계층.
 
-설계 SOT: `Obsidian-airlens/wiki/architecture/free-global-near-real-time-aq-macos-2026-07-16.md`
+설계 배경(비공개 내부 노트 2026-07-16 — 동작 정의는 코드·테스트·계약):
 §"검증 게이트" — "source별 null ratio, 값 범위, 중복 좌표, timestamp gap, 공간 커버리지를
 검사한다." 이 모듈은 그 4항목을 `mac_aq_adapter` 의 envelope/point/grid 계약 위에서 구현한다.
 

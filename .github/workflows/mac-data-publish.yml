@@ -1,6 +1,6 @@
 name: Mac Free Global AQ Snapshot Publish
 
-# design SOT: Obsidian-airlens/wiki/architecture/free-global-near-real-time-aq-macos-2026-07-16.md
+# 설계 배경: 비공개 내부 노트(2026-07-16). 동작 정의는 이 워크플로와 scripts/etl/ 코드·테스트·contracts/.
 # campaign plan: mac-p1-global-aq-pipeline (W2 — "publish workflow + CDN 착지 검증").
 #
 # Runs the mac AQ producers (CAMS global gases+PM, NOAA GEFS-Aerosols global PM,

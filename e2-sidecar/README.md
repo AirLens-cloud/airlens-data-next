@@ -25,7 +25,8 @@ Tailscale 접속, 주소는 private 런북)의 systemd 타이머가 매시 HF da
 
 생산자는 다른 레포다 — airlens-web의 `workers/assistant/src/persist.ts`가 엣지에서
 개인정보를 마스킹한 턴 1건을 JSON 객체 1개로 R2에 떨어뜨린다. 이 스크립트가 그걸
-가져와 `/var/lib/airlens/chatlog/chatlog.db`(0600)에 넣는다.
+가져와 VM의 SQLite 파일(0600)에 넣는다. 생산자 쪽 흐름은
+[airlens-web `workers/assistant/`](https://github.com/AirLens-cloud/airlens-web/tree/main/workers/assistant)를 본다.
 
 - **전송은 pull 전용** — 이 VM도 워커 오리진도 인바운드를 열지 않는다.
 - **삭제는 행 확인 뒤에만.** 객체가 유일본이라, insert가 트랜잭션 밖에서 실패했는데
@@ -40,39 +41,27 @@ Tailscale 접속, 주소는 private 런북)의 systemd 타이머가 매시 HF da
   라이프사이클 `expire-7d`(prefix `turn/`)로 자동 소멸 — 타이머가 며칠 죽어도 그
   안에 복구되면 무손실이고, 7일 초과분은 유실을 허용한다(로그이지 원장이 아니다).
 
-## VM 측 전제 (deploy.sh가 만들지 않는 것)
+## 운영 원칙
 
-- **시크릿**: `/etc/airlens/hf_token`, `/etc/airlens/openaq_api_key`,
-  `/etc/airlens/cf_r2_chatlog` — systemd `LoadCredential`로 주입. **레포에 절대
-  편입 금지.** 로테이션은 VM에서 파일 교체만 하면 된다(유닛 재시작 불요 —
-  oneshot이 매 슬롯 다시 읽음).
-- `cf_r2_chatlog` 형식 (3줄, 0600 root:root):
-  ```
-  account_id=<Cloudflare 계정 ID>
-  access_key_id=<R2 API 토큰의 Access Key ID>
-  secret_access_key=<R2 API 토큰의 Secret Access Key>
-  ```
-  토큰은 **`airlens-chatlog` 버킷 한정 Object Read & Write** 스코프여야 한다.
-  같은 계정에 `airlens-models`·`airlens-captures`가 있어서, 계정 스코프 토큰이면
-  이 VM이 그것들까지 갖게 된다.
-- `/opt/airlens/lib` — `deploy.sh`가 이 레포의 `scripts/etl/hf_publish.py`와 `contracts/`를
-  같은 상대 구조로 설치한다. 운영 타이머(`run-global-shadow.sh`)는 레포 클론이 필요 없다.
-- `/opt/airlens/repo` — 예전 모노레포 클론. 이제 legacy `run-shadow.sh` + `airkorea_shadow.ts`
-  (타이머 없음)만 의존한다. 지우면 그 둘이 깨진다 — 레거시를 버릴 때 함께 제거한다.
-- `/opt/airlens/venv` — huggingface_hub 설치된 파이썬 venv.
-- deno (`/usr/local/bin` PATH), `/var/lib/airlens/{shadow,hf-home}` 쓰기 경로.
+- **시크릿은 레포에 두지 않는다.** VM의 파일을 systemd `LoadCredential`로 주입하고,
+  교체는 VM에서 파일만 바꾼다(oneshot 유닛이 슬롯마다 다시 읽으므로 재시작 불요).
+- 채팅 로그용 R2 토큰은 **`airlens-chatlog` 버킷 한정 Object Read & Write** 스코프여야
+  한다. 계정 스코프 토큰이면 이 VM이 같은 계정의 다른 버킷까지 갖게 된다.
+- `deploy.sh`가 이 레포의 `scripts/etl/hf_publish.py`와 `contracts/`를 VM에 같은 상대
+  구조로 설치한다. 운영 타이머(`run-global-shadow.sh`)는 레포 클론이 필요 없다.
+- 시크릿 파일 형식, VM 경로와 레거시 정리 대상, 접속 값은 비공개 런북에 있다.
 
 ## 접속 / 배포 / 검증
 
 ```bash
-# 접속 (Tailscale SSH — 로컬 rtk 훅 회피를 위해 command ssh 권장)
-command ssh -i "$E2_SSH_KEY" "$E2_HOST"
+# 접속 (Tailscale SSH) — E2_HOST·E2_SSH_KEY 값은 비공개 런북에 있다
+ssh -i "$E2_SSH_KEY" "$E2_HOST"
 
-# 배포 (멱등) — E2_HOST·E2_SSH_KEY 는 private 런북(AirLens-cloud/.github-private) 참조
+# 배포 (멱등)
 ./deploy.sh
 
 # 검증 1 — 타이머 살아있나
-command ssh -i "$E2_SSH_KEY" "$E2_HOST" 'systemctl list-timers airlens-*'
+ssh -i "$E2_SSH_KEY" "$E2_HOST" 'systemctl list-timers airlens-*'
 
 # 검증 2 — 실제 발행됐나 (green≠working: 산출물로 본다)
 # 다음 정시 슬롯 후 HF openaq-shadow/ 최신 파일 타임스탬프 확인.

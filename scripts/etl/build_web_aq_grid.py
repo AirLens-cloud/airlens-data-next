@@ -19,7 +19,7 @@
 2. **표현 형식** — mac 은 dense 배열(행마다 nx 개 값, 좌표는 header 에서 계산),
    웹은 각 점마다 `{lat, lon, value}`를 **명시**하는 sparse 리스트. 점마다 좌표를 반복하므로
    원본 해상도(1°, nx·ny 수만 개) 그대로 내보내면 300KB 게이트를 수십 배 초과한다
-   (`Obsidian-airlens` 실측 없이도 산수로 확인 가능 — 65,160점 × ~40B ≈ 2.6MB).
+   (실측 없이도 산수로 확인 가능 — 65,160점 × ~40B ≈ 2.6MB).
    그래서 기존 Open-Meteo aq-grid 피드와 같은 5° 해상도로 다운샘플한다
    (`apps/web/src/lib/config/globeOntology.ts` `aqPipeline` 주석 `resolution: '5°'` 정합).
    다운샘플은 보간·평균이 아니라 **기존에 실재하는 격자점만 골라낸다** — 없는 값을

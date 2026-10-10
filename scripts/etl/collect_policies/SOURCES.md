@@ -2,7 +2,7 @@
 
 This pipeline builds `policy_registry` from **structured, free, no-LLM** sources only.
 Strategy = "Global institution data (tier 1) + major-country structured sources (tier 2)".
-Server-Collect: GitHub Actions runner → Supabase REST → DB. No client external calls.
+Server-Collect: GitHub Actions runner → HF dataset `Robeedau/airlens-live` (`insights-data/policy/`). No client external calls.
 
 ## Active sources (in pipeline)
 
@@ -15,19 +15,19 @@ Server-Collect: GitHub Actions runner → Supabase REST → DB. No client extern
 
 Merged via `merge_policies.py` (dedup by country+normalized-name) →
 `Data/6-policy-analysis/registry/policy_registry.json` (~376 policies / 124 countries) →
-`export_frontend.py` (public JSON) + `upsert_supabase.py` (DB).
+`export_frontend.py` (public JSON) → `hf_publish.py upload` → `insights-data/policy/`.
 
 ## Continuity (the gap this closes)
 
 - **Weekly cron** = `.github/workflows/policy-collect.yml` (Sun 04:00 UTC). Refreshes the
   light sources (WHO + major). CPR corpus refresh is opt-in (`run_cpr` dispatch input)
   since it's a ~3.59GB HF download — it doesn't change daily.
-- **Cron-safe write** = `upsert_supabase.py` (REST `Prefer: resolution=merge-duplicates`,
-  i.e. `ON CONFLICT(id) DO UPDATE`). Never deletes → CPR rows persist between corpus
-  refreshes. Replaces `seed_supabase.py`, which *generates* a fixed migration and can't
-  be re-run on a cron without overwriting a past migration.
-- **No new secret** — reuses the existing `SUPABASE_SERVICE_ROLE_KEY` GitHub Actions secret.
-  `seed_supabase.py` is kept for one-time local migration generation.
+- **Write** = `hf_publish.py upload` of `policy_registry.json` and the frontend exports to
+  `insights-data/policy/` (replaces the earlier database upsert). Each run rebuilds the
+  registry from the sources that ran and overwrites the published files, so CPR rows appear
+  only after a run with `run_cpr`.
+- **Secrets** — `HF_TOKEN` (publish, CPR download). `OPENAI_API_KEY` only for the opt-in LLM
+  extraction below.
 
 ## Candidate structured sources (next, not in this PR)
 

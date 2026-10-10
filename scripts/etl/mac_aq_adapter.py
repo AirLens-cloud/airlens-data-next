@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """macOS 무료 글로벌 근실시간 대기질 파이프라인 — 소스 어댑터 공통 인터페이스.
 
-설계 SOT: `Obsidian-airlens/wiki/architecture/free-global-near-real-time-aq-macos-2026-07-16.md`
+설계 배경(비공개 내부 노트 2026-07-16 — 동작 정의는 코드·테스트·계약):
 §"P0 파일 구조" §"필수 레코드". 이 모듈은 그 레코드 스키마를 코드로 고정한 **어댑터 계약**이다.
 
 이 계약을 구현하는 두 부류:
@@ -29,7 +29,7 @@
 
 정직성 원칙 (기존 `collect_noaa_aq.py`/`collect_gfs_wind.py` 와 동일):
 - 값이 없으면 0 으로 메우지 않는다 — 호출자가 해당 소스를 skip/exit 1 한다.
-- `quality` 는 플랫폼 DQSS(베이지안 신뢰도 엔진, `models/dqss/`)가 아니다. 이 파이프라인은
+- `quality` 는 플랫폼 DQSS(규칙 기반 5요소 점수, 정의는 `contracts/README.md`)가 아니다. 이 파이프라인은
   DB/서버가 없는 정적 스냅샷이므로 신선도+완전성 기반의 단순 휴리스틱만 제공한다
   (`estimate_quality()` docstring 참조). "다른 quantity" 혼동 방지
   ([[feedback_shared_name_hides_different_quantity]] 정합).
@@ -88,7 +88,7 @@ def pollutant_value(value_ugm3: float, source_variable: str, conversion: str) ->
 # ────────────────────────── quality 휴리스틱 (pure) ──────────────────────────
 
 def estimate_quality(pollutant_count: int, expected_count: int, age_hours: float) -> dict:
-    """신선도 + 완전성 기반 단순 등급. 플랫폼 DQSS(베이지안 신뢰도 엔진)가 아니다.
+    """신선도 + 완전성 기반 단순 등급. 플랫폼 DQSS(규칙 기반 5요소 점수)가 아니다.
 
     이 파이프라인은 Supabase/서버가 없는 정적 스냅샷이라 `models/dqss/` 의 5-컴포넌트
     신뢰도 엔진을 못 쓴다. 대신 두 신호만 본다:
