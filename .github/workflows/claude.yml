@@ -12,9 +12,9 @@ name: Claude (@claude mention)
 #   (additional_permissions). 비워 두면 설치 권한 전체(workflows·repository_hooks write 포함)가 온다.
 # - 공개 레포라 Claude 에게 넘기는 코멘트는 목록의 멤버·claude[bot]·요청자(github.actor) 것만
 #   넣는다 (include_comments_by_actor). 멤버가 늘면 목록에 추가한다.
-# - 과금: secret ANTHROPIC_API_KEY 는 개인 Platform Org 의 API 프로모션 크레딧이다
-#   ($100, 2026-10-28 UTC 만료). 만료 뒤 크레딧 오류가 나면 이 파일·claude-review.yml·
-#   secret 을 지우거나 CLAUDE_CODE_OAUTH_TOKEN(좌석 과금)으로 바꾼다.
+# - 과금: secret CLAUDE_CODE_OAUTH_TOKEN(`claude setup-token` 으로 발급한 구독 토큰)이 그 계정의
+#   구독 한도를 쓴다. API 키 프로모션 크레딧은 이 액션 요청에 적용되지 않는다(400 "Credit
+#   balance is too low", 2026-10-10 확인). 토큰이 새면 claude.ai 에서 폐기하고 secret 을 바꾼다.
 
 on:
   issue_comment:
@@ -80,7 +80,7 @@ jobs:
       - name: Run Claude Code
         uses: anthropics/claude-code-action@46a42b43239748e5b25771606bf1f551c3b1b517  # v1.0.232
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           use_commit_signing: true
           additional_permissions: |
             actions: read
