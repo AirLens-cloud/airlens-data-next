@@ -12,7 +12,7 @@ permissions: {}
 jobs:
   review:
     name: Claude Review
-    # 과금·만료·앱 토큰 범위는 claude.yml 머리 주석 참고. 드래프트·bot(Dependabot 등)·fork PR 은 건너뛴다.
+    # 과금·앱 토큰 범위는 claude.yml 머리 주석 참고. 드래프트·bot(Dependabot 등)·fork PR 은 건너뛴다.
     if: >-
       github.event.pull_request.draft == false &&
       github.event.pull_request.user.type != 'Bot' &&
@@ -36,7 +36,7 @@ jobs:
       - name: Run Claude review
         uses: anthropics/claude-code-action@46a42b43239748e5b25771606bf1f551c3b1b517  # v1.0.232
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # actions: read 는 여기서 쓰지 않는다. 값이 있어야 앱 토큰을 좁혀 받는다 (claude.yml 머리 주석).
           additional_permissions: |
             actions: read
