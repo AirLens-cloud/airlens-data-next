@@ -531,18 +531,25 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # 5) 국가별 CSV + manifest 발행.
+    #    CSV 는 월별 하위 폴더(YYYY-MM/)에 쓴다. HF 는 폴더당 파일 1만 개가 상한인데
+    #    하루 ~149개국이라 평면 폴더는 2026-11 에 찬다(2026-10-10 실측 5,082개).
+    #    manifest.json 은 prefix 바로 아래에 두고, 항목의 `path`(prefix 기준 상대
+    #    경로)로 위치를 알린다. `name` 은 그대로라 소비자의 파일명 allowlist 가 유지된다.
     date_tag = args.date_tag or datetime.now(timezone.utc).strftime("%Y%m%d")
+    month_dir = f"{date_tag[:4]}-{date_tag[4:6]}"
+    (out_dir / month_dir).mkdir(parents=True, exist_ok=True)
     manifest_files = []
     for cc, rows in sorted(by_country.items()):
         fname = f"openaq_{cc}_multi_{date_tag}.csv"
-        fpath = out_dir / fname
+        rel_path = f"{month_dir}/{fname}"
+        fpath = out_dir / rel_path
         with open(fpath, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES)
             w.writeheader()
             w.writerows(rows)
         digest = hashlib.sha256(fpath.read_bytes()).hexdigest()
         manifest_files.append({
-            "name": fname, "sha256": digest,
+            "name": fname, "path": rel_path, "sha256": digest,
             "bytes": fpath.stat().st_size, "rows": len(rows),
         })
 
