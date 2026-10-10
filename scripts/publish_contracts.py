@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """publish_contracts.py — Evidence Contract producer 발행 1단계.
 
-EVIDENCE_CONTRACT.md (Obsidian-airlens/raw/docs/platform/EVIDENCE_CONTRACT.md) §5 의
+`contracts/EVIDENCE_CONTRACT.md` §5 의
 producer 의무 중 세 발행물을 만든다:
 
   meta/product_manifest.json  — Data Product Manifest v1 (§5-1)

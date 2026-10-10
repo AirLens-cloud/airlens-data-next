@@ -6,7 +6,8 @@ Free ($0), keyless, machine-readable JSON (federalregister.gov/api/v1). Tier 2 s
 source: EPA-issued final rules matching air-quality terms, filtered a second time by an
 air-quality keyword check to drop unrelated EPA actions and term false-positives.
 
-No LLM. Server-Collect: GitHub Actions runner → by_source JSON → upsert REST → DB.
+No LLM. Server-Collect: GitHub Actions runner → by_source JSON → hf_publish.py upload →
+HF `insights-data/policy/` (see SOURCES.md).
 
 Usage:
   python3 scripts/etl/collect_policies/collect_federal_register.py

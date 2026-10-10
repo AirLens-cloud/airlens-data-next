@@ -1,6 +1,6 @@
 name: Evidence Contract — Producer Manifests
 
-# EVIDENCE_CONTRACT.md (Obsidian-airlens/raw/docs/platform/EVIDENCE_CONTRACT.md) §5
+# contracts/EVIDENCE_CONTRACT.md §5
 # producer 의무 1단계. scripts/publish_contracts.py 가 HF `Robeedau/airlens-live` 의
 # 실제 파일 트리를 조회해 meta/product_manifest.json · meta/source_registry.json ·
 # meta/product_health.json 세 발행물을 만들고 그대로 되쓴다(다른 워크플로가 쓰는

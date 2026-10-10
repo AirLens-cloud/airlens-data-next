@@ -245,7 +245,7 @@ def test_contract_rejects_negative_concentration(schema):
 
 def test_contract_allows_an_honest_null_cell(schema):
     # Arrange — non-nullable 로 잠그면 정직한 결측이 발행 전체를 멈춘다
-    # (AirLens-platform db63c41c 사고). null 은 반드시 통과해야 한다.
+    # (비공개 ML 파이프라인에서 실제로 난 사고). null 은 반드시 통과해야 한다.
     grid = _grid()
     grid["points"][0]["value"] = None
     # Act/Assert — 예외가 나면 실패

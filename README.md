@@ -2,7 +2,7 @@
 
 AirLens 데이터 수집 파이프라인 — 스케줄 수집기가 외부 공개 API에서 데이터를 모아
 Hugging Face 데이터셋 [`Robeedau/airlens-live`](https://huggingface.co/datasets/Robeedau/airlens-live)로 발행한다.
-(2026-08-26 `AirLens-cloud/AirLens` 모노레포에서 분리. 2026-10-10 public 전환 — 모든 스케줄 잡이 GitHub hosted 러너(`ubuntu-latest`)에서 돈다. 이전 이력은 private `airlens-data-archive`에 보존.)
+(2026-08-26 비공개 ML 모노레포에서 분리. 2026-10-10 public 전환 — 모든 스케줄 잡이 GitHub hosted 러너(`ubuntu-latest`)에서 돈다. 이전 이력은 비공개 보관 레포에 보존.)
 
 ## 워크플로
 
@@ -27,16 +27,28 @@ Hugging Face 데이터셋 [`Robeedau/airlens-live`](https://huggingface.co/datas
 ETL 스크립트는 `scripts/etl/` (모노레포 경로 보존 — 워크플로 수정 최소화).
 HF 초기 시드(hf-live-seed)는 모노레포 정적 데이터 의존이라 이관하지 않음(이미 시드 완료).
 
+## 문서
+
+| 문서 | 내용 |
+|---|---|
+| [`DATA_SOURCES.md`](DATA_SOURCES.md) | 외부 데이터 출처·라이선스·표기 |
+| [`contracts/README.md`](contracts/README.md) | 발행물 계약(스키마) 색인, `validate.py` 사용법, DQSS 정의 |
+| [`contracts/EVIDENCE_CONTRACT.md`](contracts/EVIDENCE_CONTRACT.md) | 사용자에게 보이는 값이 지켜야 할 증거 규칙 |
+| [`e2-sidecar/README.md`](e2-sidecar/README.md) | E2 사이드카(OpenAQ·Sensor.Community 시간별 수집, 채팅 로그 pull) |
+| [`scripts/etl/collect_policies/SOURCES.md`](scripts/etl/collect_policies/SOURCES.md) | 정책 레지스트리 수집원 |
+
 ## Secrets (Actions repo-level)
 
 등록: Settings → Secrets and variables → Actions → New repository secret
 
 | 이름 | 용도 |
 |---|---|
-| `HF_TOKEN` | HF `Robeedau/airlens-live` write (전 워크플로) |
+| `HF_TOKEN` | HF `Robeedau/airlens-live` write (HF에 쓰는 워크플로 전부) |
 | `NASA_FIRMS_MAP_KEY` | firms-collect |
 | `CDS_API_KEY` | mac-data-publish (Copernicus ADS — CAMS. `CDS_API_URL`은 워크플로에 하드코딩) |
 | `AIRKOREA_API_KEY` | mac-data-publish (공공데이터포털 에어코리아) |
+| `OPENAQ_API_KEY` | openaq-bulk-collect |
+| `OPENAI_API_KEY` | policy-collect — 선택, 수동 실행에서 `run_llm_extract`를 켤 때만 |
 
 ## 로컬 훅
 

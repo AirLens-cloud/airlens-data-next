@@ -1,7 +1,7 @@
 name: Mac Free Global AQ Snapshot Publish
 
-# design SOT: Obsidian-airlens/wiki/architecture/free-global-near-real-time-aq-macos-2026-07-16.md
-# campaign plan: mac-p1-global-aq-pipeline (W2 — "publish workflow + CDN 착지 검증").
+# 설계 배경: 비공개 내부 노트(2026-07-16). 동작 정의는 이 워크플로와 scripts/etl/ 코드·테스트·contracts/.
+# 작업 단계: W2 — "publish workflow + CDN 착지 검증".
 #
 # Runs the mac AQ producers (CAMS global gases+PM, NOAA GEFS-Aerosols global PM,
 # AirKorea + EEA-UTD regional observations — AirKorea is cred-gated and skips
@@ -10,7 +10,7 @@ name: Mac Free Global AQ Snapshot Publish
 # to the public HF dataset repo (Robeedau/airlens-live, `mac-data/data/**` prefix) via
 # scripts/etl/hf_publish.py — no Supabase DB/Edge Function/R2 in this hot path (design SOT
 # §"완전 무료 배포 구조" L54). GitHub Pages retired 2026-08-26 ahead of the repo's planned
-# private-visibility flip (plan: frolicking-squishing-crane Wave S2) — Pages does not serve
+# private-visibility flip — Pages does not serve
 # from a private repo on the Free plan.
 #
 # SCOPE NOTE (do not confuse with the full P0 contract): the design SOT's file layout
@@ -21,7 +21,7 @@ name: Mac Free Global AQ Snapshot Publish
 # lists it as an unimplemented W1 deliverable. This workflow instead publishes each
 # source's own QA'd/quantized envelope (`mac_aq_adapter` schema) flat, at
 # `data/mac/v1/sources/<source>.json`, plus an observability `data/mac/v1/index.json`.
-# No consumer reads this path yet — `apps/mac/AirLens/Data/AirLensSnapshotClient.swift`
+# No consumer reads this path yet — the mac client's snapshot reader
 # (P1-lite) still reads the pre-existing `airlens.cloud/data/current-{pm25,pm10}-grid.json`
 # Cloudflare Pages artifact built by the unrelated `frontend-data-sync.yml` pipeline.
 # Promoting the mac client to consume this path is W3 in the campaign plan.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CAMS global atmospheric composition forecast 수집기 — 가스(O3/NO2/SO2/CO) + PM.
 
-design SOT: `Obsidian-airlens/wiki/architecture/free-global-near-real-time-aq-macos-2026-07-16.md`
+설계 배경(비공개 내부 노트 2026-07-16 — 동작 정의는 코드·테스트·계약):
 §"무료 글로벌 소스 판정" — "CAMS global atmospheric composition forecasts ... 전 세계 가스와
 모델 기본값의 정본". 이 스크립트는 Copernicus ADS(Atmosphere Data Store) 의
 `cams-global-atmospheric-composition-forecasts` dataset 을 최신 0h step(analysis)으로

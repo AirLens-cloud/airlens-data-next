@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """EEA Up-To-Date(UTD/E2a) 근실시간 관측소 수집기 — mac 무료 파이프라인용 (W5-b).
 
-design SOT: `Obsidian-airlens/wiki/architecture/free-global-near-real-time-aq-macos-2026-07-16.md`
+설계 배경(비공개 내부 노트 2026-07-16 — 동작 정의는 코드·테스트·계약):
 §"무료 글로벌 소스 판정" — "EEA Up-To-Date | 유럽 관측소, near-real-time | 국가별 관측
 오염물질 | EEA 소유 자료는 CC BY | 유럽 관측 보정".
 

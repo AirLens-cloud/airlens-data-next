@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """NOAA GEFS-Aerosols 글로벌 PM 수집기 — mac 무료 파이프라인용 envelope 스키마.
 
-design SOT: `Obsidian-airlens/wiki/architecture/free-global-near-real-time-aq-macos-2026-07-16.md`
+설계 배경(비공개 내부 노트 2026-07-16 — 동작 정의는 코드·테스트·계약):
 §"무료 글로벌 소스 판정" — "NOAA GEFS-Chem ... PM 기본값과 CAMS 장애 폴백".
 
 이 파일은 기존 `collect_noaa_aq.py`(Globe 프론트가 소비하는 `current-pm25-grid.json`
 레거시 계약, 손대지 않음)와 **같은 원자료**(GEFS-Aerosols PMTF/PMTC GRIB)를 재사용하되,
 출력을 `mac_aq_adapter.build_grid_reading()` envelope 계약으로 조립한다. mac 파이프라인의
 producer 산출물과 기존 Supabase Globe 파이프라인 산출물은 서로 다른 소비자를 위한 별도
-스냅샷이라 스키마를 공유하지 않는다 ([[feedback_shared_name_hides_different_quantity]] 정합
-— 같은 소스, 다른 계약).
+스냅샷이라 스키마를 공유하지 않는다 (같은 소스, 다른 계약 — 이름이 같아도 다른 양일 수 있다).
 
 원자료: gefs.YYYYMMDD/HH/chem/pgrb2ap25/gefs.chem.tHHz.a2d_0p25.f000.grib2 (+.idx)
   - PM2.5 = GRIB record `PMTF:surface:...aerosol_size <2.5e-06`

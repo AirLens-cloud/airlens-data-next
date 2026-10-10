@@ -14,12 +14,11 @@
    행 인덱스와 함께 *감소*). `AQGridResponse.latMin`은 반대로 **남단**이 origin이다
    (`parseGridResponse`가 `latIdx = round((lat - latMin) / dLat)`로 위도가 커질수록
    인덱스도 커진다고 가정). `latMin`을 실수로 `la1`(북단) 그대로 쓰면 지구본이 남북으로
-   뒤집힌다 — 이게 이 파일이 막아야 할 1순위 회귀([[feedback_null_estimate_falls_into_assertion]]
-   과 같은 부류의 "부호 반대" 실수).
+   뒤집힌다 — 이게 이 파일이 막아야 할 1순위 회귀("부호 반대" 실수).
 2. **표현 형식** — mac 은 dense 배열(행마다 nx 개 값, 좌표는 header 에서 계산),
    웹은 각 점마다 `{lat, lon, value}`를 **명시**하는 sparse 리스트. 점마다 좌표를 반복하므로
    원본 해상도(1°, nx·ny 수만 개) 그대로 내보내면 300KB 게이트를 수십 배 초과한다
-   (`Obsidian-airlens` 실측 없이도 산수로 확인 가능 — 65,160점 × ~40B ≈ 2.6MB).
+   (실측 없이도 산수로 확인 가능 — 65,160점 × ~40B ≈ 2.6MB).
    그래서 기존 Open-Meteo aq-grid 피드와 같은 5° 해상도로 다운샘플한다
    (`apps/web/src/lib/config/globeOntology.ts` `aqPipeline` 주석 `resolution: '5°'` 정합).
    다운샘플은 보간·평균이 아니라 **기존에 실재하는 격자점만 골라낸다** — 없는 값을
@@ -27,8 +26,7 @@
    같은 이유로, 실제로 GRIB 이 낸 값 그대로 재사용한다.
 3. **timestamp** — `generatedAt`(원본 수집 시각)을 epoch ms 로 **보존**한다. 변환을
    실행하는 시점의 현재 시각을 쓰면 안 된다 — last-good baseline 이 재발행될 때마다
-   신선도가 거짓으로 갱신되는 사고([[feedback_null_estimate_falls_into_assertion]]류의
-   정직성 회귀)가 난다.
+   신선도가 거짓으로 갱신되는 사고(정직성 회귀)가 난다.
 
 CLI:
     python3 build_web_aq_grid.py --input <gefs-chem 스냅샷.json> --out-dir <dir> \\
